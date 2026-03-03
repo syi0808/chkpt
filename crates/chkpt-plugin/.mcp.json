@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "chkpt": {
+      "command": "npx",
+      "args": ["-y", "@chkpt/mcp"]
+    }
+  }
+}

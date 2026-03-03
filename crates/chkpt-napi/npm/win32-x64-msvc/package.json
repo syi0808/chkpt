@@ -1,0 +1,21 @@
+{
+  "name": "@chkpt/platform-win32-x64-msvc",
+  "version": "0.1.2",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "chkpt.win32-x64-msvc.node",
+  "files": [
+    "chkpt.win32-x64-msvc.node",
+    "chkpt.exe",
+    "chkpt-mcp.exe"
+  ],
+  "description": "chkpt native bindings and CLI for win32-x64-msvc",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  }
+}

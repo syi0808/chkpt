@@ -1,0 +1,22 @@
+{
+  "name": "@chkpt/mcp",
+  "version": "0.1.2",
+  "description": "MCP server for chkpt – run via npx @chkpt/mcp",
+  "bin": {
+    "chkpt-mcp": "./cli.mjs"
+  },
+  "files": [
+    "cli.mjs"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  },
+  "optionalDependencies": {
+    "@chkpt/platform-darwin-arm64": "0.1.2",
+    "@chkpt/platform-darwin-x64": "0.1.2",
+    "@chkpt/platform-linux-arm64-gnu": "0.1.2",
+    "@chkpt/platform-linux-x64-gnu": "0.1.2",
+    "@chkpt/platform-win32-x64-msvc": "0.1.2"
+  }
+}

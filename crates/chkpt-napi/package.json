@@ -1,0 +1,51 @@
+{
+  "name": "chkpt",
+  "version": "0.1.2",
+  "description": "Filesystem checkpoint engine - save, restore, and manage workspace snapshots",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "bin": {
+    "chkpt": "./cli.mjs"
+  },
+  "napi": {
+    "binaryName": "chkpt",
+    "packageName": "@chkpt/platform",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "build:all": "bash scripts/build-all.sh",
+    "prepublishOnly": "napi prepublish -t npm",
+    "publish:all": "bash scripts/publish.sh",
+    "test": "vitest run",
+    "version": "napi version"
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@napi-rs/cli": "^3",
+    "vitest": "^3"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "cli.mjs"
+  ],
+  "optionalDependencies": {
+    "@chkpt/platform-darwin-arm64": "0.1.2",
+    "@chkpt/platform-darwin-x64": "0.1.2",
+    "@chkpt/platform-linux-arm64-gnu": "0.1.2",
+    "@chkpt/platform-linux-x64-gnu": "0.1.2",
+    "@chkpt/platform-win32-x64-msvc": "0.1.2"
+  }
+}

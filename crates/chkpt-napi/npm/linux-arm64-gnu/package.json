@@ -1,0 +1,24 @@
+{
+  "name": "@chkpt/platform-linux-arm64-gnu",
+  "version": "0.1.2",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "chkpt.linux-arm64-gnu.node",
+  "files": [
+    "chkpt.linux-arm64-gnu.node",
+    "chkpt",
+    "chkpt-mcp"
+  ],
+  "description": "chkpt native bindings and CLI for linux-arm64-gnu",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  },
+  "libc": [
+    "glibc"
+  ]
+}

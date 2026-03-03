@@ -1,0 +1,2 @@
+[build.env]
+passthrough = ["NAPI_RS_CLI_VERSION"]

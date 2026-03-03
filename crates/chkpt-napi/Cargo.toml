@@ -1,0 +1,20 @@
+[package]
+name = "chkpt-napi"
+version = "0.1.0"
+edition = "2021"
+description = "Node.js N-API bindings for chkpt – a fast, content-addressable checkpoint system"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+chkpt-core = { version = "0.1.0", path = "../chkpt-core" }
+napi = { version = "3", default-features = false, features = ["async", "serde-json", "napi9"] }
+napi-derive = "3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[build-dependencies]
+napi-build = "2"

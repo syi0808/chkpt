@@ -1,0 +1,20 @@
+{
+  "name": "chkpt-marketplace",
+  "owner": {
+    "name": "chkpt"
+  },
+  "metadata": {
+    "description": "Workspace checkpoint tools for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "chkpt",
+      "source": "./crates/chkpt-plugin",
+      "description": "Fast workspace checkpoints — save and restore snapshots without Git pollution",
+      "version": "0.1.2",
+      "category": "developer-tools",
+      "tags": ["checkpoint", "snapshot", "backup", "workspace"],
+      "keywords": ["checkpoint", "snapshot", "backup"]
+    }
+  ]
+}

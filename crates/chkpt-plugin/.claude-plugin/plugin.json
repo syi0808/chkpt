@@ -1,0 +1,12 @@
+{
+  "name": "chkpt",
+  "description": "Fast, content-addressable workspace checkpoints. Save and restore workspace snapshots without Git pollution.",
+  "version": "0.1.2",
+  "author": {
+    "name": "chkpt"
+  },
+  "homepage": "https://github.com/syi0808/chkpt",
+  "repository": "https://github.com/syi0808/chkpt",
+  "license": "Apache-2.0",
+  "keywords": ["checkpoint", "snapshot", "backup", "workspace"]
+}

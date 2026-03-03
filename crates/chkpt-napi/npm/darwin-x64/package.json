@@ -1,0 +1,21 @@
+{
+  "name": "@chkpt/platform-darwin-x64",
+  "version": "0.1.2",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "chkpt.darwin-x64.node",
+  "files": [
+    "chkpt.darwin-x64.node",
+    "chkpt",
+    "chkpt-mcp"
+  ],
+  "description": "chkpt native bindings and CLI for darwin-x64",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">= 18"
+  }
+}
