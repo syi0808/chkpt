@@ -1,29 +1,52 @@
 # chkpt
 
-Save and restore your entire workspace without touching Git.
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-One `chkpt save` before a big refactor, dependency update, or AI agent run — and you can roll back anytime.
+> Save and restore your entire workspace without touching Git.
 
-## Why chkpt?
+chkpt is a fast, content-addressable checkpoint system that saves and restores entire workspace snapshots without touching Git.
 
-| Current approach | Problem |
-|-----------------|---------|
-| `git stash` | Tangles with staged state, misses untracked files |
-| Temporary branches | Pollutes branch list, needs cleanup |
-| Manual copies | Slow, error-prone, wastes disk space |
+One `chkpt save` before a big refactor, dependency update, or AI agent run — and you can roll back anytime. Unlike `git stash` or temporary branches, chkpt captures everything (including untracked files), deduplicates content with BLAKE3 hashing, and compresses with zstd — so snapshots are fast and storage-efficient.
 
-**chkpt takes a different approach:**
+## Features
 
-- **BLAKE3 hashing** — Content-addressed deduplication, identical files stored once
-- **zstd compression** — Minimizes storage footprint
-- **SQLite index** — Detects only changed files for incremental saves
-- **Atomic restore** — Workspace stays intact even if restore fails midway
+- **Content-Addressed Deduplication** — BLAKE3 hashing ensures identical files are stored only once
+- **zstd Compression** — Minimizes storage footprint for every blob
+- **Incremental Saves** — SQLite index detects only changed files, skipping unchanged content
+- **Atomic Restore** — Workspace stays intact even if a restore fails midway
+- **Dependency Attachments** — Optionally include `node_modules` or `.git` history in checkpoints
+- **Multiple Interfaces** — CLI, Node.js API, MCP server, and Claude Code plugin
 
-## Installation
+## Getting Started
 
-### Claude Code Plugin (recommended)
+### Requirements
 
-```shell
+- **CLI (Rust)**: Rust toolchain (for `cargo install`)
+- **CLI / MCP (Node.js)**: Node.js 18 or later (for `npx`)
+
+### Install
+
+#### CLI via Cargo
+
+```bash
+cargo install chkpt-cli
+```
+
+#### CLI via npx
+
+```bash
+npx chkpt
+```
+
+#### MCP Server
+
+```bash
+npx @chkpt/mcp
+```
+
+#### Claude Code Plugin (recommended)
+
+```bash
 # Add the marketplace
 /plugin marketplace add syi0808/chkpt
 
@@ -33,23 +56,11 @@ One `chkpt save` before a big refactor, dependency update, or AI agent run — a
 
 This activates 4 MCP tools and the automation skill (`/chkpt:chkpt`).
 
-### CLI
-
-```shell
-cargo install chkpt-cli
-```
-
-### MCP Server (standalone)
-
-```shell
-npx @chkpt/mcp
-```
-
 ## Usage
 
 ### CLI
 
-```shell
+```bash
 # Save current workspace
 chkpt save -m "before refactor"
 
@@ -64,6 +75,16 @@ chkpt restore <id> --dry-run
 
 # Delete a checkpoint
 chkpt delete <id>
+```
+
+### Optional Attachments
+
+```bash
+# Include dependencies (node_modules, etc.)
+chkpt save --with-deps
+
+# Include Git history
+chkpt save --with-git
 ```
 
 ### Claude Code MCP Tools
@@ -98,18 +119,8 @@ Workspace                      ~/.chkpt/stores/
 1. **Scan** — Walk files according to `.chkptignore` rules
 2. **Hash** — Generate BLAKE3 content hash for each file
 3. **Deduplicate** — Skip content already in the store
-4. **Compress & store** — Write new content with zstd compression
-5. **Record snapshot** — Save tree structure and metadata to SQLite
-
-## Optional Attachments
-
-```shell
-# Include dependencies (node_modules, etc.)
-chkpt save --with-deps
-
-# Include Git history
-chkpt save --with-git
-```
+4. **Compress & Store** — Write new content with zstd compression
+5. **Record Snapshot** — Save tree structure and metadata
 
 ## Project Structure
 
@@ -123,11 +134,31 @@ crates/
 └── chkpt-plugin/    # Claude Code plugin
 ```
 
-## Requirements
+## FAQ
 
-- **CLI**: Rust toolchain
-- **Plugin / MCP**: Node.js (to run via npx)
+**How much disk space do checkpoints use?**
+chkpt deduplicates at the file level using BLAKE3 content hashing and compresses blobs with zstd. If most files haven't changed between saves, the incremental cost is minimal.
+
+**Does chkpt replace Git?**
+No. chkpt is designed for quick, local snapshots — not version control. Think of it as a "save game" for your workspace. Use Git for collaboration and history; use chkpt for instant rollback points.
+
+**What files does chkpt ignore?**
+By default, chkpt skips `.git/`, `node_modules/`, and other common build artifacts. You can customize this with a `.chkptignore` file (same syntax as `.gitignore`).
+
+**Are there size limits?**
+Default guardrails allow up to 2 GB total, 100,000 files, and 100 MB per file. These are configurable.
+
+**Does it work on Windows?**
+Yes. Pre-built binaries are available for macOS (arm64, x64), Linux (arm64, x64), and Windows (x64).
+
+## Contributing
+
+Contributions are welcome. Please read the [Contributing Guide](CONTRIBUTING.md) before submitting a pull request.
 
 ## License
 
-Apache-2.0
+This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
+
+## Author
+
+**Yein Sung** — [GitHub](https://github.com/syi0808)
