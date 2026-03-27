@@ -2,7 +2,7 @@
 
 > **chkpt** — A fast, content-addressable checkpoint system for saving and restoring workspace snapshots without touching Git.
 
-This document provides a comprehensive architectural overview of chkpt, including monorepo structure, crate dependencies, internal module organization, design patterns, and data flows.
+This document covers chkpt's architecture: monorepo structure, crate dependencies, module organization, design patterns, and data flows.
 
 ---
 
@@ -473,7 +473,7 @@ For each scanned file:
      └── Any differ → read file → BLAKE3 hash → store if new
 ```
 
-This gives **O(1) per unchanged file** — no disk I/O for re-hashing. SQLite WAL mode enables concurrent readers.
+This gives **O(1) per unchanged file** since there's no disk I/O for re-hashing. SQLite WAL mode enables concurrent readers.
 
 ### Operations
 

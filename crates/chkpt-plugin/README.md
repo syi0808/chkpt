@@ -16,16 +16,16 @@ Fast, content-addressable workspace checkpoints for Claude Code.
 
 ### MCP Server (4 tools)
 
-- `checkpoint_save` — Save a workspace snapshot
-- `checkpoint_list` — List available checkpoints
-- `checkpoint_restore` — Restore to a checkpoint (with dry-run)
-- `checkpoint_delete` — Delete a checkpoint
+- `checkpoint_save`: save a workspace snapshot
+- `checkpoint_list`: list available checkpoints
+- `checkpoint_restore`: restore to a checkpoint (with dry-run)
+- `checkpoint_delete`: delete a checkpoint
 
 ### Skill (`/chkpt:chkpt`)
 
-- **Proactive automation** — Suggests checkpoints before risky operations (large refactors, file deletion, dependency changes)
-- **Direct operations** — Save, list, restore, delete via MCP tools
-- **Store inspection** — Examine checkpoint internals and compare snapshots
+- **Proactive automation**: suggests checkpoints before risky operations (large refactors, file deletion, dependency changes)
+- **Direct operations**: save, list, restore, delete via MCP tools
+- **Store inspection**: examine checkpoint internals and compare snapshots
 
 ## Requirements
 

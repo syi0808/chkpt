@@ -1,10 +1,10 @@
 # Contributing to chkpt
 
-Thank you for your interest in contributing to chkpt. This guide explains how to report issues, suggest improvements, and submit code changes.
+This guide covers how to report issues, suggest improvements, and submit code changes.
 
 ## Code of Conduct
 
-Please be respectful and constructive in all interactions. We are committed to providing a welcoming and inclusive experience for everyone.
+Be respectful and constructive in all interactions.
 
 ## How to Contribute
 

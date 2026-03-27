@@ -4,18 +4,16 @@
 
 > Save and restore your entire workspace without touching Git.
 
-chkpt is a fast, content-addressable checkpoint system that saves and restores entire workspace snapshots without touching Git.
-
-One `chkpt save` before a big refactor, dependency update, or AI agent run — and you can roll back anytime. Unlike `git stash` or temporary branches, chkpt captures everything (including untracked files), deduplicates content with BLAKE3 hashing, and compresses with zstd — so snapshots are fast and storage-efficient.
+chkpt is a fast, content-addressable checkpoint system. One `chkpt save` before a big refactor, dependency update, or AI agent run, and you can roll back anytime. Unlike `git stash` or temporary branches, chkpt captures everything (including untracked files), deduplicates content with BLAKE3 hashing, and compresses with zstd. Snapshots are fast and take up little disk space.
 
 ## Features
 
-- **Content-Addressed Deduplication** — BLAKE3 hashing ensures identical files are stored only once
-- **zstd Compression** — Minimizes storage footprint for every blob
-- **Incremental Saves** — SQLite index detects only changed files, skipping unchanged content
-- **Atomic Restore** — Workspace stays intact even if a restore fails midway
-- **Dependency Attachments** — Optionally include `node_modules` or `.git` history in checkpoints
-- **Multiple Interfaces** — CLI, Node.js API, MCP server, and Claude Code plugin
+- **Content-addressed deduplication** via BLAKE3 hashing. Identical files are stored only once.
+- **zstd compression** for every blob, keeping storage small.
+- **Incremental saves** with a SQLite index that detects only changed files.
+- **Atomic restore** that keeps your workspace intact if something fails midway.
+- **Dependency attachments** for optionally including `node_modules` or `.git` history.
+- **Multiple interfaces**: CLI, Node.js API, MCP server, and Claude Code plugin.
 
 ## Getting Started
 
@@ -116,11 +114,11 @@ Workspace                      ~/.chkpt/stores/
                               └──────────────────┘
 ```
 
-1. **Scan** — Walk files according to `.chkptignore` rules
-2. **Hash** — Generate BLAKE3 content hash for each file
-3. **Deduplicate** — Skip content already in the store
-4. **Compress & Store** — Write new content with zstd compression
-5. **Record Snapshot** — Save tree structure and metadata
+1. **Scan**: walk files according to `.chkptignore` rules
+2. **Hash**: generate a BLAKE3 content hash for each file
+3. **Deduplicate**: skip content already in the store
+4. **Compress & store**: write new content with zstd compression
+5. **Record snapshot**: save tree structure and metadata
 
 ## Project Structure
 
@@ -140,7 +138,7 @@ crates/
 chkpt deduplicates at the file level using BLAKE3 content hashing and compresses blobs with zstd. If most files haven't changed between saves, the incremental cost is minimal.
 
 **Does chkpt replace Git?**
-No. chkpt is designed for quick, local snapshots — not version control. Think of it as a "save game" for your workspace. Use Git for collaboration and history; use chkpt for instant rollback points.
+No. chkpt is for quick, local snapshots, not version control. Think of it as a "save game" for your workspace. Use Git for collaboration and history; use chkpt for instant rollback points.
 
 **What files does chkpt ignore?**
 By default, chkpt skips `.git/`, `node_modules/`, and other common build artifacts. You can customize this with a `.chkptignore` file (same syntax as `.gitignore`).
