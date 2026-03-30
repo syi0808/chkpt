@@ -58,3 +58,17 @@ fn test_hash_content_without_storing() {
     let hash = chkpt_core::store::blob::hash_content(b"test");
     assert_eq!(hash.len(), 64); // 64 hex chars
 }
+
+#[test]
+fn test_blob_write_with_known_hash() {
+    let dir = TempDir::new().unwrap();
+    let store = BlobStore::new(dir.path().to_path_buf());
+    let content = b"write with known hash";
+    let hash = chkpt_core::store::blob::hash_content(content);
+
+    let stored_hash = store.write_with_hash(&hash, content).unwrap();
+    let read_back = store.read(&stored_hash).unwrap();
+
+    assert_eq!(stored_hash, hash);
+    assert_eq!(read_back, content);
+}

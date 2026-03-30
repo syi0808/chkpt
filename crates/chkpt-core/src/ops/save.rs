@@ -68,6 +68,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // 5. Open/create FileIndex
     let index = FileIndex::open(layout.index_path())?;
+    let cached_entries = index.entries_by_path()?;
 
     // 6. Create blob store
     let blob_store = BlobStore::new(layout.objects_dir());
@@ -78,7 +79,11 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     let mut total_bytes: u64 = 0;
 
     for scanned in &scanned_files {
-        let pf = process_file(scanned, &index, &blob_store)?;
+        let pf = process_file(
+            scanned,
+            cached_entries.get(&scanned.relative_path),
+            &blob_store,
+        )?;
         total_bytes += pf.size;
         if pf.is_new_object {
             new_objects += 1;
@@ -133,20 +138,17 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     // 13. Lock released automatically via drop
 
     // 14. Return SaveResult
-    Ok(SaveResult {
-        snapshot_id,
-        stats,
-    })
+    Ok(SaveResult { snapshot_id, stats })
 }
 
 /// Process a single scanned file: check the index cache, hash, and store blob.
 fn process_file(
     scanned: &ScannedFile,
-    index: &FileIndex,
+    cached: Option<&FileEntry>,
     blob_store: &BlobStore,
 ) -> Result<ProcessedFile> {
     // Check index for cached entry
-    if let Some(cached) = index.get(&scanned.relative_path)? {
+    if let Some(cached) = cached {
         // If mtime + size + inode match, skip re-hash
         if cached.mtime_secs == scanned.mtime_secs
             && cached.mtime_nanos == scanned.mtime_nanos
@@ -173,12 +175,7 @@ fn process_file(
     let blob_hash_bytes = hex_to_bytes(&blob_hash_hex)?;
 
     // Check if blob already exists (dedup across files)
-    let is_new_object = if blob_store.exists(&blob_hash_hex) {
-        false
-    } else {
-        blob_store.write(&content)?;
-        true
-    };
+    let is_new_object = blob_store.write_if_missing(&blob_hash_hex, &content)?;
 
     Ok(ProcessedFile {
         relative_path: scanned.relative_path.clone(),
@@ -227,8 +224,16 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
     let mut dir_list: Vec<String> = all_dirs.into_iter().collect();
     // Sort by depth (deepest first), then alphabetically for same depth
     dir_list.sort_by(|a, b| {
-        let depth_a = if a.is_empty() { 0 } else { a.matches('/').count() + 1 };
-        let depth_b = if b.is_empty() { 0 } else { b.matches('/').count() + 1 };
+        let depth_a = if a.is_empty() {
+            0
+        } else {
+            a.matches('/').count() + 1
+        };
+        let depth_b = if b.is_empty() {
+            0
+        } else {
+            b.matches('/').count() + 1
+        };
         depth_b.cmp(&depth_a).then_with(|| a.cmp(b))
     });
 

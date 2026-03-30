@@ -1,4 +1,4 @@
-use chkpt_core::index::{FileIndex, FileEntry};
+use chkpt_core::index::{FileEntry, FileIndex};
 use tempfile::TempDir;
 
 #[test]
@@ -81,7 +81,8 @@ fn test_index_all_paths() {
             mtime_nanos: 0,
             inode: None,
             mode: 0o644,
-        }).unwrap();
+        })
+        .unwrap();
     }
     let paths = idx.all_paths().unwrap();
     assert_eq!(paths.len(), 3);
@@ -91,15 +92,17 @@ fn test_index_all_paths() {
 fn test_index_bulk_upsert() {
     let dir = TempDir::new().unwrap();
     let idx = FileIndex::open(dir.path().join("index.sqlite")).unwrap();
-    let entries: Vec<FileEntry> = (0..100).map(|i| FileEntry {
-        path: format!("file_{}.txt", i),
-        blob_hash: [i as u8; 32],
-        size: i as u64,
-        mtime_secs: 1000 + i as i64,
-        mtime_nanos: 0,
-        inode: None,
-        mode: 0o644,
-    }).collect();
+    let entries: Vec<FileEntry> = (0..100)
+        .map(|i| FileEntry {
+            path: format!("file_{}.txt", i),
+            blob_hash: [i as u8; 32],
+            size: i as u64,
+            mtime_secs: 1000 + i as i64,
+            mtime_nanos: 0,
+            inode: None,
+            mode: 0o644,
+        })
+        .collect();
     idx.bulk_upsert(&entries).unwrap();
     assert_eq!(idx.all_paths().unwrap().len(), 100);
 }
@@ -109,9 +112,49 @@ fn test_index_clear() {
     let dir = TempDir::new().unwrap();
     let idx = FileIndex::open(dir.path().join("index.sqlite")).unwrap();
     idx.upsert(&FileEntry {
-        path: "x.txt".into(), blob_hash: [0u8; 32], size: 1,
-        mtime_secs: 1, mtime_nanos: 0, inode: None, mode: 0o644,
-    }).unwrap();
+        path: "x.txt".into(),
+        blob_hash: [0u8; 32],
+        size: 1,
+        mtime_secs: 1,
+        mtime_nanos: 0,
+        inode: None,
+        mode: 0o644,
+    })
+    .unwrap();
     idx.clear().unwrap();
     assert_eq!(idx.all_paths().unwrap().len(), 0);
+}
+
+#[test]
+fn test_index_entries_by_path() {
+    let dir = TempDir::new().unwrap();
+    let idx = FileIndex::open(dir.path().join("index.sqlite")).unwrap();
+
+    idx.bulk_upsert(&[
+        FileEntry {
+            path: "a.txt".into(),
+            blob_hash: [1u8; 32],
+            size: 1,
+            mtime_secs: 1,
+            mtime_nanos: 0,
+            inode: Some(10),
+            mode: 0o644,
+        },
+        FileEntry {
+            path: "b.txt".into(),
+            blob_hash: [2u8; 32],
+            size: 2,
+            mtime_secs: 2,
+            mtime_nanos: 0,
+            inode: Some(11),
+            mode: 0o644,
+        },
+    ])
+    .unwrap();
+
+    let entries = idx.entries_by_path().unwrap();
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries["a.txt"].blob_hash, [1u8; 32]);
+    assert_eq!(entries["b.txt"].size, 2);
 }

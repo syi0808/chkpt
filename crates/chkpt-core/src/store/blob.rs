@@ -29,19 +29,30 @@ impl BlobStore {
     /// Deduplicates: skips write if hash already exists.
     pub fn write(&self, content: &[u8]) -> Result<String> {
         let hash_hex = hash_content(content);
-        let path = self.object_path(&hash_hex);
+        self.write_if_missing(&hash_hex, content)?;
+        Ok(hash_hex)
+    }
+
+    /// Write content using a caller-provided hash.
+    pub fn write_with_hash(&self, hash_hex: &str, content: &[u8]) -> Result<String> {
+        self.write_if_missing(hash_hex, content)?;
+        Ok(hash_hex.to_string())
+    }
+
+    /// Write content if the object is not already present.
+    pub fn write_if_missing(&self, hash_hex: &str, content: &[u8]) -> Result<bool> {
+        let path = self.object_path(hash_hex);
         if path.exists() {
-            return Ok(hash_hex);
+            return Ok(false);
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let compressed = zstd::encode_all(&content[..], 3)?;
-        // Write atomically via temp file + rename
         let tmp_path = path.with_extension("tmp");
         std::fs::write(&tmp_path, &compressed)?;
         std::fs::rename(&tmp_path, &path)?;
-        Ok(hash_hex)
+        Ok(true)
     }
 
     /// Read and decompress a blob by hash.

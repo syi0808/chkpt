@@ -2,11 +2,12 @@ use crate::config::{project_id_from_path, StoreLayout};
 use crate::error::{ChkpttError, Result};
 use crate::index::FileIndex;
 use crate::ops::lock::ProjectLock;
+use crate::scanner::ScannedFile;
 use crate::store::blob::{hash_content, BlobStore};
 use crate::store::pack::read_object;
 use crate::store::snapshot::SnapshotStore;
 use crate::store::tree::{EntryType, TreeStore};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 #[derive(Debug, Default)]
@@ -21,6 +22,11 @@ pub struct RestoreResult {
     pub files_changed: u64,
     pub files_removed: u64,
     pub files_unchanged: u64,
+}
+
+struct CurrentFileState {
+    scanned: ScannedFile,
+    hash_hex: String,
 }
 
 /// Convert a [u8; 32] to a 64-char hex string.
@@ -63,13 +69,35 @@ fn collect_tree_files(
 ///
 /// This uses the scanner to discover files, then hashes each file to get the current
 /// content hash for comparison with the target snapshot state.
-fn scan_current_state(workspace_root: &Path) -> Result<BTreeMap<String, String>> {
+fn scan_current_state(
+    workspace_root: &Path,
+    cached_entries: &HashMap<String, crate::index::FileEntry>,
+) -> Result<BTreeMap<String, CurrentFileState>> {
     let scanned = crate::scanner::scan_workspace(workspace_root, None)?;
     let mut state = BTreeMap::new();
     for file in &scanned {
-        let content = std::fs::read(&file.absolute_path)?;
-        let hash = hash_content(&content);
-        state.insert(file.relative_path.clone(), hash);
+        let hash_hex = if let Some(cached) = cached_entries.get(&file.relative_path) {
+            if cached.mtime_secs == file.mtime_secs
+                && cached.mtime_nanos == file.mtime_nanos
+                && cached.size == file.size
+                && cached.inode == file.inode
+            {
+                bytes_to_hex(&cached.blob_hash)
+            } else {
+                let content = std::fs::read(&file.absolute_path)?;
+                hash_content(&content)
+            }
+        } else {
+            let content = std::fs::read(&file.absolute_path)?;
+            hash_content(&content)
+        };
+        state.insert(
+            file.relative_path.clone(),
+            CurrentFileState {
+                scanned: file.clone(),
+                hash_hex,
+            },
+        );
     }
     Ok(state)
 }
@@ -138,7 +166,9 @@ pub fn restore(
     collect_tree_files(&tree_store, &root_tree_hash_hex, "", &mut target_state)?;
 
     // 5. Scan current workspace to get current state (path -> content_hash_hex)
-    let current_state = scan_current_state(workspace_root)?;
+    let index = FileIndex::open(layout.index_path())?;
+    let cached_entries = index.entries_by_path()?;
+    let current_state = scan_current_state(workspace_root, &cached_entries)?;
 
     // 6. Compare target state vs current state
     let target_paths: BTreeSet<&String> = target_state.keys().collect();
@@ -156,7 +186,7 @@ pub fn restore(
 
     for path in &files_in_both {
         let target_hash = &target_state[*path];
-        let current_hash = &current_state[*path];
+        let current_hash = &current_state[*path].hash_hex;
         if target_hash != current_hash {
             files_to_change.push(path);
         } else {
@@ -207,28 +237,9 @@ pub fn restore(
     cleanup_empty_dirs(workspace_root)?;
 
     // 9. Reset the FileIndex: clear and rebuild from target state
-    let index = FileIndex::open(layout.index_path())?;
     index.clear()?;
 
-    // Rebuild index from the restored workspace files
-    let scanned = crate::scanner::scan_workspace(workspace_root, None)?;
-    let file_entries: Vec<crate::index::FileEntry> = scanned
-        .iter()
-        .map(|sf| {
-            let content = std::fs::read(&sf.absolute_path).unwrap_or_default();
-            let hash_hex = hash_content(&content);
-            let blob_hash = hex_to_bytes(&hash_hex);
-            crate::index::FileEntry {
-                path: sf.relative_path.clone(),
-                blob_hash,
-                size: sf.size,
-                mtime_secs: sf.mtime_secs,
-                mtime_nanos: sf.mtime_nanos,
-                inode: sf.inode,
-                mode: sf.mode,
-            }
-        })
-        .collect();
+    let file_entries = rebuild_index_entries(workspace_root, &target_state, &current_state)?;
     index.bulk_upsert(&file_entries)?;
 
     Ok(result)
@@ -245,6 +256,129 @@ fn hex_to_bytes(hex: &str) -> [u8; 32] {
     bytes
 }
 
+fn rebuild_index_entries(
+    workspace_root: &Path,
+    target_state: &BTreeMap<String, String>,
+    current_state: &BTreeMap<String, CurrentFileState>,
+) -> Result<Vec<crate::index::FileEntry>> {
+    let mut file_entries = Vec::with_capacity(target_state.len());
+    for (path, hash_hex) in target_state {
+        let absolute_path = workspace_root.join(path);
+        let metadata = std::fs::metadata(&absolute_path)?;
+        let scanned = current_state
+            .get(path)
+            .filter(|state| {
+                state.scanned.mtime_secs == metadata_mtime_secs(&metadata)
+                    && state.scanned.mtime_nanos == metadata_mtime_nanos(&metadata)
+                    && state.scanned.size == metadata.len()
+                    && state.scanned.inode == metadata_inode(&metadata)
+            })
+            .map(|state| state.scanned.clone())
+            .unwrap_or_else(|| scanned_file_from_metadata(path.clone(), absolute_path, &metadata));
+
+        file_entries.push(crate::index::FileEntry {
+            path: scanned.relative_path,
+            blob_hash: hex_to_bytes(hash_hex),
+            size: scanned.size,
+            mtime_secs: scanned.mtime_secs,
+            mtime_nanos: scanned.mtime_nanos,
+            inode: scanned.inode,
+            mode: scanned.mode,
+        });
+    }
+    Ok(file_entries)
+}
+
+#[cfg(unix)]
+fn scanned_file_from_metadata(
+    relative_path: String,
+    absolute_path: std::path::PathBuf,
+    metadata: &std::fs::Metadata,
+) -> ScannedFile {
+    use std::os::unix::fs::MetadataExt;
+
+    ScannedFile {
+        relative_path,
+        absolute_path,
+        size: metadata.len(),
+        mtime_secs: metadata.mtime(),
+        mtime_nanos: metadata.mtime_nsec(),
+        inode: Some(metadata.ino()),
+        mode: metadata.mode(),
+    }
+}
+
+#[cfg(not(unix))]
+fn scanned_file_from_metadata(
+    relative_path: String,
+    absolute_path: std::path::PathBuf,
+    metadata: &std::fs::Metadata,
+) -> ScannedFile {
+    use std::time::UNIX_EPOCH;
+
+    let (mtime_secs, mtime_nanos) = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| (duration.as_secs() as i64, duration.subsec_nanos() as i64))
+        .unwrap_or((0, 0));
+
+    ScannedFile {
+        relative_path,
+        absolute_path,
+        size: metadata.len(),
+        mtime_secs,
+        mtime_nanos,
+        inode: None,
+        mode: 0o644,
+    }
+}
+
+#[cfg(unix)]
+fn metadata_mtime_secs(metadata: &std::fs::Metadata) -> i64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mtime()
+}
+
+#[cfg(not(unix))]
+fn metadata_mtime_secs(metadata: &std::fs::Metadata) -> i64 {
+    use std::time::UNIX_EPOCH;
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn metadata_mtime_nanos(metadata: &std::fs::Metadata) -> i64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mtime_nsec()
+}
+
+#[cfg(not(unix))]
+fn metadata_mtime_nanos(metadata: &std::fs::Metadata) -> i64 {
+    use std::time::UNIX_EPOCH;
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.subsec_nanos() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn metadata_inode(metadata: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    Some(metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn metadata_inode(_metadata: &std::fs::Metadata) -> Option<u64> {
+    None
+}
+
 /// Recursively remove empty directories under root (but not root itself).
 fn cleanup_empty_dirs(root: &Path) -> Result<()> {
     cleanup_empty_dirs_recursive(root, root)
@@ -256,9 +390,7 @@ fn cleanup_empty_dirs_recursive(root: &Path, dir: &Path) -> Result<()> {
     }
 
     // First recurse into subdirectories
-    let entries: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .collect();
+    let entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
 
     for entry in &entries {
         if entry.file_type().map_or(false, |ft| ft.is_dir()) {
@@ -268,9 +400,7 @@ fn cleanup_empty_dirs_recursive(root: &Path, dir: &Path) -> Result<()> {
 
     // After recursing, check if directory is now empty (and it's not the root)
     if dir != root {
-        let remaining: Vec<_> = std::fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .collect();
+        let remaining: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
         if remaining.is_empty() {
             std::fs::remove_dir(dir)?;
         }

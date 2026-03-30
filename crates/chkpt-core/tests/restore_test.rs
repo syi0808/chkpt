@@ -1,7 +1,7 @@
-use chkpt_core::ops::save::{save, SaveOptions};
 use chkpt_core::ops::restore::{restore, RestoreOptions};
-use tempfile::TempDir;
+use chkpt_core::ops::save::{save, SaveOptions};
 use std::fs;
+use tempfile::TempDir;
 
 #[test]
 fn test_restore_basic() {
@@ -83,4 +83,22 @@ fn test_restore_with_subdirectories() {
 
     let content = fs::read_to_string(workspace.path().join("src/main.rs")).unwrap();
     assert_eq!(content, "fn main(){}");
+}
+
+#[test]
+fn test_save_after_restore_stays_incremental() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "v1").unwrap();
+    let snapshot = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    fs::write(workspace.path().join("a.txt"), "v2 with longer content").unwrap();
+    restore(
+        workspace.path(),
+        &snapshot.snapshot_id,
+        RestoreOptions::default(),
+    )
+    .unwrap();
+
+    let resaved = save(workspace.path(), SaveOptions::default()).unwrap();
+    assert_eq!(resaved.stats.new_objects, 0);
 }
