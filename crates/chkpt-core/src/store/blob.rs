@@ -39,8 +39,12 @@ impl BlobStore {
         Ok(hash_hex.to_string())
     }
 
-    /// Write content if the object is not already present.
-    pub fn write_if_missing(&self, hash_hex: &str, content: &[u8]) -> Result<bool> {
+    /// Write already-compressed content if the object is not already present.
+    pub fn write_precompressed_if_missing(
+        &self,
+        hash_hex: &str,
+        compressed: &[u8],
+    ) -> Result<bool> {
         let path = self.object_path(hash_hex);
         if path.exists() {
             return Ok(false);
@@ -48,11 +52,16 @@ impl BlobStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let compressed = zstd::encode_all(&content[..], 3)?;
         let tmp_path = path.with_extension("tmp");
-        std::fs::write(&tmp_path, &compressed)?;
+        std::fs::write(&tmp_path, compressed)?;
         std::fs::rename(&tmp_path, &path)?;
         Ok(true)
+    }
+
+    /// Write content if the object is not already present.
+    pub fn write_if_missing(&self, hash_hex: &str, content: &[u8]) -> Result<bool> {
+        let compressed = zstd::encode_all(&content[..], 3)?;
+        self.write_precompressed_if_missing(hash_hex, &compressed)
     }
 
     /// Read and decompress a blob by hash.

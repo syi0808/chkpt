@@ -3,10 +3,12 @@ use crate::error::{ChkpttError, Result};
 use crate::index::{FileEntry, FileIndex};
 use crate::ops::lock::ProjectLock;
 use crate::scanner::{scan_workspace, ScannedFile};
-use crate::store::blob::{hash_content, BlobStore};
+use crate::store::blob::BlobStore;
+use crate::store::pack::{PackSet, PackWriter};
 use crate::store::snapshot::{Snapshot, SnapshotAttachments, SnapshotStats, SnapshotStore};
 use crate::store::tree::{EntryType, TreeEntry, TreeStore};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::{BufReader, Read, Write};
 use std::path::Path;
 
 #[derive(Debug, Default)]
@@ -42,10 +44,18 @@ struct ProcessedFile {
     blob_hash_bytes: [u8; 32],
     size: u64,
     mode: u32,
+}
+
+struct PreparedFile {
+    relative_path: String,
+    blob_hash_hex: String,
+    blob_hash_bytes: [u8; 32],
+    compressed: Vec<u8>,
+    size: u64,
+    mode: u32,
     mtime_secs: i64,
     mtime_nanos: i64,
     inode: Option<u64>,
-    is_new_object: bool,
 }
 
 /// Save a checkpoint of the workspace.
@@ -72,23 +82,82 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // 6. Create blob store
     let blob_store = BlobStore::new(layout.objects_dir());
+    let packs_dir = layout.packs_dir();
+    let pack_set = PackSet::open_all(&packs_dir)?;
+    let mut pack_writer = PackWriter::new();
+    let mut staged_pack_hashes = HashSet::new();
 
     // 7. Process each scanned file: check index, hash, store blob
     let mut processed_files = Vec::with_capacity(scanned_files.len());
-    let mut new_objects: u64 = 0;
+    let mut files_to_prepare = Vec::new();
+    let mut updated_entries = Vec::new();
     let mut total_bytes: u64 = 0;
+    let mut current_paths = (!cached_entries.is_empty()).then(|| HashSet::with_capacity(scanned_files.len()));
 
     for scanned in &scanned_files {
-        let pf = process_file(
-            scanned,
-            cached_entries.get(&scanned.relative_path),
-            &blob_store,
-        )?;
-        total_bytes += pf.size;
-        if pf.is_new_object {
+        if let Some(paths) = current_paths.as_mut() {
+            paths.insert(scanned.relative_path.clone());
+        }
+
+        if let Some(processed) = cached_processed_file(scanned, cached_entries.get(&scanned.relative_path)) {
+            total_bytes += processed.size;
+            processed_files.push(processed);
+        } else {
+            files_to_prepare.push(scanned);
+        }
+    }
+    let removed_paths = current_paths
+        .map(|paths| {
+            cached_entries
+                .keys()
+                .filter(|path| !paths.contains(*path))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut new_objects: u64 = 0;
+    for prepared in prepare_files(files_to_prepare)? {
+        let PreparedFile {
+            relative_path,
+            blob_hash_hex,
+            blob_hash_bytes,
+            compressed,
+            size,
+            mode,
+            mtime_secs,
+            mtime_nanos,
+            inode,
+        } = prepared;
+
+        total_bytes += size;
+        if !staged_pack_hashes.contains(&blob_hash_hex)
+            && !blob_store.exists(&blob_hash_hex)
+            && !pack_set.contains(&blob_hash_hex)
+        {
+            pack_writer.add_pre_compressed(blob_hash_hex.clone(), compressed);
+            staged_pack_hashes.insert(blob_hash_hex.clone());
             new_objects += 1;
         }
-        processed_files.push(pf);
+
+        updated_entries.push(FileEntry {
+            path: relative_path.clone(),
+            blob_hash: blob_hash_bytes,
+            size,
+            mtime_secs,
+            mtime_nanos,
+            inode,
+            mode,
+        });
+        processed_files.push(ProcessedFile {
+            relative_path,
+            blob_hash_bytes,
+            size,
+            mode,
+        });
+    }
+    if !staged_pack_hashes.is_empty() {
+        pack_writer.finish(&packs_dir)?;
     }
 
     // 8. Build tree bottom-up
@@ -120,20 +189,9 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     // 11. Save snapshot
     snapshot_store.save(&snapshot)?;
 
-    // 12. Update FileIndex with all current file entries
-    let file_entries: Vec<FileEntry> = processed_files
-        .iter()
-        .map(|pf| FileEntry {
-            path: pf.relative_path.clone(),
-            blob_hash: pf.blob_hash_bytes,
-            size: pf.size,
-            mtime_secs: pf.mtime_secs,
-            mtime_nanos: pf.mtime_nanos,
-            inode: pf.inode,
-            mode: pf.mode,
-        })
-        .collect();
-    index.bulk_upsert(&file_entries)?;
+    // 12. Update only changed index entries and remove stale paths.
+    index.bulk_remove(&removed_paths)?;
+    index.bulk_upsert(&updated_entries)?;
 
     // 13. Lock released automatically via drop
 
@@ -141,51 +199,91 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     Ok(SaveResult { snapshot_id, stats })
 }
 
-/// Process a single scanned file: check the index cache, hash, and store blob.
-fn process_file(
+fn cached_processed_file(
     scanned: &ScannedFile,
     cached: Option<&FileEntry>,
-    blob_store: &BlobStore,
-) -> Result<ProcessedFile> {
-    // Check index for cached entry
+) -> Option<ProcessedFile> {
     if let Some(cached) = cached {
-        // If mtime + size + inode match, skip re-hash
         if cached.mtime_secs == scanned.mtime_secs
             && cached.mtime_nanos == scanned.mtime_nanos
             && cached.size == scanned.size
             && cached.inode == scanned.inode
         {
-            // Use cached hash - no new object
-            return Ok(ProcessedFile {
+            return Some(ProcessedFile {
                 relative_path: scanned.relative_path.clone(),
                 blob_hash_bytes: cached.blob_hash,
                 size: scanned.size,
                 mode: scanned.mode,
-                mtime_secs: scanned.mtime_secs,
-                mtime_nanos: scanned.mtime_nanos,
-                inode: scanned.inode,
-                is_new_object: false,
             });
         }
     }
+    None
+}
 
-    // Need to read, hash, and store
-    let content = std::fs::read(&scanned.absolute_path)?;
-    let blob_hash_hex = hash_content(&content);
+fn prepare_file(scanned: &ScannedFile) -> Result<PreparedFile> {
+    let file = std::fs::File::open(&scanned.absolute_path)?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = blake3::Hasher::new();
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3)?;
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        let chunk = &buffer[..bytes_read];
+        hasher.update(chunk);
+        encoder.write_all(chunk)?;
+    }
+
+    let compressed = encoder.finish()?;
+    let blob_hash_hex = hasher.finalize().to_hex().to_string();
     let blob_hash_bytes = hex_to_bytes(&blob_hash_hex)?;
 
-    // Check if blob already exists (dedup across files)
-    let is_new_object = blob_store.write_if_missing(&blob_hash_hex, &content)?;
-
-    Ok(ProcessedFile {
+    Ok(PreparedFile {
         relative_path: scanned.relative_path.clone(),
+        blob_hash_hex,
         blob_hash_bytes,
+        compressed,
         size: scanned.size,
         mode: scanned.mode,
         mtime_secs: scanned.mtime_secs,
         mtime_nanos: scanned.mtime_nanos,
         inode: scanned.inode,
-        is_new_object,
+    })
+}
+
+fn prepare_files(scanned_files: Vec<&ScannedFile>) -> Result<Vec<PreparedFile>> {
+    if scanned_files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let worker_count = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .min(scanned_files.len());
+    if worker_count <= 1 {
+        return scanned_files.into_iter().map(prepare_file).collect();
+    }
+
+    let chunk_size = scanned_files.len().div_ceil(worker_count);
+    std::thread::scope(|scope| {
+        let mut workers = Vec::new();
+        for chunk in scanned_files.chunks(chunk_size) {
+            workers.push(scope.spawn(move || -> Result<Vec<PreparedFile>> {
+                chunk.iter().map(|scanned| prepare_file(scanned)).collect()
+            }));
+        }
+
+        let mut prepared = Vec::new();
+        for worker in workers {
+            let chunk = worker
+                .join()
+                .map_err(|_| ChkpttError::Other("save worker thread panicked".into()))??;
+            prepared.extend(chunk);
+        }
+        Ok(prepared)
     })
 }
 
@@ -195,8 +293,10 @@ fn process_file(
 /// recursively builds subtrees for subdirectories, and returns the root tree hash.
 fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Result<String> {
     // Group files by parent directory
-    // Key: directory path (empty string for root), Value: list of (filename, hash, size, mode)
     let mut dir_files: BTreeMap<String, Vec<&ProcessedFile>> = BTreeMap::new();
+    let mut all_dirs: BTreeSet<String> = BTreeSet::new();
+    let mut child_dirs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    all_dirs.insert(String::new()); // root always exists
 
     for pf in processed_files {
         let parent = if let Some(pos) = pf.relative_path.rfind('/') {
@@ -204,20 +304,8 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
         } else {
             String::new() // root directory
         };
-        dir_files.entry(parent).or_default().push(pf);
-    }
-
-    // Collect all unique directory paths (including intermediate ones)
-    let mut all_dirs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    all_dirs.insert(String::new()); // root always exists
-    for dir in dir_files.keys() {
-        if !dir.is_empty() {
-            // Add this directory and all ancestor directories
-            let parts: Vec<&str> = dir.split('/').collect();
-            for i in 1..=parts.len() {
-                all_dirs.insert(parts[..i].join("/"));
-            }
-        }
+        dir_files.entry(parent.clone()).or_default().push(pf);
+        register_directory_hierarchy(&parent, &mut all_dirs, &mut child_dirs);
     }
 
     // Build trees bottom-up: process deepest directories first
@@ -262,13 +350,11 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
         }
 
         // Add subdirectory entries (directories whose parent is this directory)
-        for (sub_dir, sub_hash) in &dir_hashes {
-            let parent_of_sub = if let Some(pos) = sub_dir.rfind('/') {
-                &sub_dir[..pos]
-            } else {
-                "" // parent is root
-            };
-            if parent_of_sub == dir.as_str() {
+        if let Some(children) = child_dirs.get(dir) {
+            for sub_dir in children {
+                let sub_hash = dir_hashes.get(sub_dir).ok_or_else(|| {
+                    ChkpttError::Other(format!("Missing tree hash for directory '{}'", sub_dir))
+                })?;
                 let sub_name = if let Some(pos) = sub_dir.rfind('/') {
                     sub_dir[pos + 1..].to_string()
                 } else {
@@ -294,6 +380,32 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
         .get("")
         .cloned()
         .ok_or_else(|| ChkpttError::Other("Failed to build root tree".into()))
+}
+
+fn register_directory_hierarchy(
+    dir: &str,
+    all_dirs: &mut BTreeSet<String>,
+    child_dirs: &mut BTreeMap<String, Vec<String>>,
+) {
+    if dir.is_empty() {
+        return;
+    }
+
+    let mut parent = String::new();
+    for segment in dir.split('/') {
+        let current = if parent.is_empty() {
+            segment.to_string()
+        } else {
+            format!("{}/{}", parent, segment)
+        };
+        if all_dirs.insert(current.clone()) {
+            child_dirs
+                .entry(parent.clone())
+                .or_default()
+                .push(current.clone());
+        }
+        parent = current;
+    }
 }
 
 #[cfg(test)]

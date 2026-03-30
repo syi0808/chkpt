@@ -26,7 +26,9 @@ impl Default for PackWriter {
 
 impl PackWriter {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, content: &[u8]) -> Result<String> {
@@ -126,6 +128,10 @@ impl PackReader {
             .map(|i| &self.idx[i])
     }
 
+    pub fn contains(&self, hash_hex: &str) -> bool {
+        self.find(hash_hex).is_some()
+    }
+
     /// Read and decompress an object. Returns None if not found.
     pub fn try_read(&self, hash_hex: &str) -> Option<Vec<u8>> {
         let entry = self.find(hash_hex)?;
@@ -150,6 +156,35 @@ impl PackReader {
     }
 }
 
+pub struct PackSet {
+    readers: Vec<PackReader>,
+}
+
+impl PackSet {
+    pub fn open_all(packs_dir: &Path) -> Result<Self> {
+        let readers = list_packs(packs_dir)?
+            .into_iter()
+            .map(|pack_hash| PackReader::open(packs_dir, &pack_hash))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { readers })
+    }
+
+    pub fn try_read(&self, hash_hex: &str) -> Option<Vec<u8>> {
+        self.readers
+            .iter()
+            .find_map(|reader| reader.try_read(hash_hex))
+    }
+
+    pub fn contains(&self, hash_hex: &str) -> bool {
+        self.readers.iter().any(|reader| reader.contains(hash_hex))
+    }
+
+    pub fn read(&self, hash_hex: &str) -> Result<Vec<u8>> {
+        self.try_read(hash_hex)
+            .ok_or_else(|| ChkpttError::ObjectNotFound(hash_hex.to_string()))
+    }
+}
+
 /// List all pack hashes in a directory.
 pub fn list_packs(packs_dir: &Path) -> Result<Vec<String>> {
     let mut packs = Vec::new();
@@ -160,7 +195,11 @@ pub fn list_packs(packs_dir: &Path) -> Result<Vec<String>> {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with("pack-") && name.ends_with(".dat") {
-            let hash = name.strip_prefix("pack-").unwrap().strip_suffix(".dat").unwrap();
+            let hash = name
+                .strip_prefix("pack-")
+                .unwrap()
+                .strip_suffix(".dat")
+                .unwrap();
             packs.push(hash.to_string());
         }
     }
@@ -193,20 +232,20 @@ pub fn read_object(blob_store: &BlobStore, packs_dir: &Path, hash_hex: &str) -> 
     if blob_store.exists(hash_hex) {
         return blob_store.read(hash_hex);
     }
-    // 2. Check packs
-    for pack_hash in list_packs(packs_dir)? {
-        let reader = PackReader::open(packs_dir, &pack_hash)?;
-        if let Some(data) = reader.try_read(hash_hex) {
-            return Ok(data);
-        }
-    }
-    Err(ChkpttError::ObjectNotFound(hash_hex.to_string()))
+    read_object_from_pack_set(&PackSet::open_all(packs_dir)?, hash_hex)
+}
+
+pub fn read_object_from_pack_set(pack_set: &PackSet, hash_hex: &str) -> Result<Vec<u8>> {
+    pack_set.read(hash_hex)
 }
 
 fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {
     let mut bytes = [0u8; 32];
     if hex.len() != 64 {
-        return Err(ChkpttError::Other(format!("Invalid hash length: {}", hex.len())));
+        return Err(ChkpttError::Other(format!(
+            "Invalid hash length: {}",
+            hex.len()
+        )));
     }
     for i in 0..32 {
         bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)

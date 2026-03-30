@@ -4,7 +4,7 @@ use crate::index::FileIndex;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
 use crate::store::blob::{hash_content, BlobStore};
-use crate::store::pack::read_object;
+use crate::store::pack::{read_object_from_pack_set, PackSet};
 use crate::store::snapshot::SnapshotStore;
 use crate::store::tree::{EntryType, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -210,11 +210,16 @@ pub fn restore(
     // 8. Perform actual restore
     let blob_store = BlobStore::new(layout.objects_dir());
     let packs_dir = layout.packs_dir();
+    let pack_set = PackSet::open_all(&packs_dir)?;
 
     // 8a. Restore files that need to be added or changed
     for path in files_to_add.iter().chain(files_to_change.iter()) {
         let blob_hash_hex = &target_state[*path];
-        let content = read_object(&blob_store, &packs_dir, blob_hash_hex)?;
+        let content = if blob_store.exists(blob_hash_hex) {
+            blob_store.read(blob_hash_hex)?
+        } else {
+            read_object_from_pack_set(&pack_set, blob_hash_hex)?
+        };
         let file_path = workspace_root.join(path);
 
         // Create parent directories if they don't exist

@@ -1,7 +1,7 @@
 pub mod schema;
 
 use crate::error::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -18,6 +18,21 @@ pub struct FileEntry {
 
 pub struct FileIndex {
     conn: Connection,
+}
+
+fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<FileEntry> {
+    let hash_blob: Vec<u8> = row.get(1)?;
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&hash_blob);
+    Ok(FileEntry {
+        path: row.get(0)?,
+        blob_hash: hash,
+        size: row.get::<_, i64>(2)? as u64,
+        mtime_secs: row.get(3)?,
+        mtime_nanos: row.get(4)?,
+        inode: row.get::<_, Option<i64>>(5)?.map(|i| i as u64),
+        mode: row.get(6)?,
+    })
 }
 
 impl FileIndex {
@@ -50,6 +65,9 @@ impl FileIndex {
     }
 
     pub fn bulk_upsert(&self, entries: &[FileEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
         let tx = self.conn.unchecked_transaction()?;
         {
             let mut stmt = tx.prepare(
@@ -76,25 +94,27 @@ impl FileIndex {
         Ok(())
     }
 
+    pub fn bulk_remove(&self, paths: &[String]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare("DELETE FROM file_index WHERE path = ?1")?;
+            for path in paths {
+                stmt.execute(params![path])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get(&self, path: &str) -> Result<Option<FileEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT path, blob_hash, size, mtime_secs, mtime_nanos, inode, mode FROM file_index WHERE path = ?1"
         )?;
         let result = stmt
-            .query_row(params![path], |row| {
-                let hash_blob: Vec<u8> = row.get(1)?;
-                let mut hash = [0u8; 32];
-                hash.copy_from_slice(&hash_blob);
-                Ok(FileEntry {
-                    path: row.get(0)?,
-                    blob_hash: hash,
-                    size: row.get::<_, i64>(2)? as u64,
-                    mtime_secs: row.get(3)?,
-                    mtime_nanos: row.get(4)?,
-                    inode: row.get::<_, Option<i64>>(5)?.map(|i| i as u64),
-                    mode: row.get(6)?,
-                })
-            })
+            .query_row(params![path], row_to_entry)
             .optional()?;
         Ok(result)
     }
@@ -118,27 +138,18 @@ impl FileIndex {
             "SELECT path, blob_hash, size, mtime_secs, mtime_nanos, inode, mode FROM file_index",
         )?;
         let entries = stmt
-            .query_map([], |row| {
-                let hash_blob: Vec<u8> = row.get(1)?;
-                let mut hash = [0u8; 32];
-                hash.copy_from_slice(&hash_blob);
-                Ok(FileEntry {
-                    path: row.get(0)?,
-                    blob_hash: hash,
-                    size: row.get::<_, i64>(2)? as u64,
-                    mtime_secs: row.get(3)?,
-                    mtime_nanos: row.get(4)?,
-                    inode: row.get::<_, Option<i64>>(5)?.map(|i| i as u64),
-                    mode: row.get(6)?,
-                })
-            })?
+            .query_map([], row_to_entry)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(entries)
     }
 
     pub fn entries_by_path(&self) -> Result<HashMap<String, FileEntry>> {
         let mut entries = HashMap::new();
-        for entry in self.all_entries()? {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, blob_hash, size, mtime_secs, mtime_nanos, inode, mode FROM file_index",
+        )?;
+        for entry in stmt.query_map([], row_to_entry)? {
+            let entry = entry?;
             entries.insert(entry.path.clone(), entry);
         }
         Ok(entries)

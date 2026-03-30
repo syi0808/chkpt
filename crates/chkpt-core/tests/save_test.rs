@@ -1,6 +1,10 @@
+use chkpt_core::config::{project_id_from_path, StoreLayout};
+use chkpt_core::index::FileIndex;
 use chkpt_core::ops::save::{save, SaveOptions};
-use tempfile::TempDir;
+use chkpt_core::store::blob::BlobStore;
+use chkpt_core::store::pack::pack_loose_objects;
 use std::fs;
+use tempfile::TempDir;
 
 #[test]
 fn test_save_basic() {
@@ -44,7 +48,10 @@ fn test_save_with_message() {
     let workspace = TempDir::new().unwrap();
     fs::write(workspace.path().join("a.txt"), "data").unwrap();
 
-    let opts = SaveOptions { message: Some("my checkpoint".into()), ..Default::default() };
+    let opts = SaveOptions {
+        message: Some("my checkpoint".into()),
+        ..Default::default()
+    };
     let result = save(workspace.path(), opts).unwrap();
     assert!(!result.snapshot_id.is_empty());
 }
@@ -58,4 +65,41 @@ fn test_save_with_subdirectories() {
 
     let result = save(workspace.path(), SaveOptions::default()).unwrap();
     assert_eq!(result.stats.total_files, 2);
+}
+
+#[test]
+fn test_save_removes_deleted_files_from_index() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("keep.txt"), "keep").unwrap();
+    fs::write(workspace.path().join("delete.txt"), "delete").unwrap();
+    save(workspace.path(), SaveOptions::default()).unwrap();
+
+    fs::remove_file(workspace.path().join("delete.txt")).unwrap();
+    save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    let index = FileIndex::open(layout.index_path()).unwrap();
+    let entries = index.entries_by_path().unwrap();
+
+    assert!(entries.contains_key("keep.txt"));
+    assert!(!entries.contains_key("delete.txt"));
+}
+
+#[test]
+fn test_save_dedups_against_packed_objects() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "same").unwrap();
+    save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    let blob_store = BlobStore::new(layout.objects_dir());
+    if !blob_store.list_loose().unwrap().is_empty() {
+        pack_loose_objects(&blob_store, &layout.packs_dir()).unwrap();
+    }
+
+    fs::write(workspace.path().join("b.txt"), "same").unwrap();
+    let result = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    assert_eq!(result.stats.new_objects, 0);
+    assert_eq!(blob_store.list_loose().unwrap().len(), 0);
 }

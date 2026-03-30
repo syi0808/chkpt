@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 use chkpt_core::scanner::{scan_workspace, ScannedFile};
-use tempfile::TempDir;
 use std::fs;
+use tempfile::TempDir;
 
 #[test]
 fn test_scan_basic_files() {
@@ -65,7 +65,9 @@ fn test_scan_excludes_node_modules_by_default() {
     fs::write(dir.path().join("node_modules/pkg/index.js"), "dep").unwrap();
 
     let files = scan_workspace(dir.path(), None).unwrap();
-    assert!(!files.iter().any(|f| f.relative_path.starts_with("node_modules")));
+    assert!(!files
+        .iter()
+        .any(|f| f.relative_path.starts_with("node_modules")));
 }
 
 #[test]
@@ -78,4 +80,22 @@ fn test_scanned_file_has_metadata() {
     assert_eq!(files[0].relative_path, "test.txt");
     assert_eq!(files[0].size, 7);
     assert!(files[0].mtime_secs > 0);
+}
+
+#[test]
+fn test_parallel_walk_matches_scan_workspace() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    fs::write(dir.path().join("src/nested/main.rs"), "fn main(){}").unwrap();
+    fs::write(dir.path().join(".chkptignore"), "*.tmp\n").unwrap();
+    fs::write(dir.path().join("skip.tmp"), "ignore me").unwrap();
+
+    let standard = scan_workspace(dir.path(), None).unwrap();
+    let parallel = chkpt_core::scanner::walker::walk_parallel(dir.path(), None).unwrap();
+
+    let standard_paths: Vec<_> = standard.iter().map(|f| f.relative_path.clone()).collect();
+    let parallel_paths: Vec<_> = parallel.iter().map(|f| f.relative_path.clone()).collect();
+
+    assert_eq!(parallel_paths, standard_paths);
 }

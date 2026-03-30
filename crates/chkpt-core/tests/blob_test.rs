@@ -72,3 +72,20 @@ fn test_blob_write_with_known_hash() {
     assert_eq!(stored_hash, hash);
     assert_eq!(read_back, content);
 }
+
+#[test]
+fn test_blob_write_precompressed_if_missing() {
+    let dir = TempDir::new().unwrap();
+    let store = BlobStore::new(dir.path().to_path_buf());
+    let content = b"precompressed";
+    let hash = chkpt_core::store::blob::hash_content(content);
+    let compressed = zstd::encode_all(&content[..], 3).unwrap();
+
+    assert!(store
+        .write_precompressed_if_missing(&hash, &compressed)
+        .unwrap());
+    assert_eq!(store.read(&hash).unwrap(), content);
+    assert!(!store
+        .write_precompressed_if_missing(&hash, &compressed)
+        .unwrap());
+}

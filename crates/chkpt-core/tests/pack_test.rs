@@ -1,5 +1,5 @@
-use chkpt_core::store::pack::{PackWriter, PackReader};
-use chkpt_core::store::blob::{BlobStore, hash_content};
+use chkpt_core::store::blob::{hash_content, BlobStore};
+use chkpt_core::store::pack::{PackReader, PackSet, PackWriter};
 use tempfile::TempDir;
 
 #[test]
@@ -77,9 +77,7 @@ fn test_pack_from_loose_objects() {
     }
 
     // Pack all loose objects
-    let pack_hash = chkpt_core::store::pack::pack_loose_objects(
-        &blob_store, &packs_dir
-    ).unwrap();
+    let pack_hash = chkpt_core::store::pack::pack_loose_objects(&blob_store, &packs_dir).unwrap();
 
     // Loose objects should be deleted
     assert_eq!(blob_store.list_loose().unwrap().len(), 0);
@@ -90,4 +88,24 @@ fn test_pack_from_loose_objects() {
         let data = reader.read(hash).unwrap();
         assert_eq!(data, format!("file-{}", i).as_bytes());
     }
+}
+
+#[test]
+fn test_pack_set_reads_across_multiple_packs() {
+    let dir = TempDir::new().unwrap();
+    let packs_dir = dir.path().join("packs");
+    std::fs::create_dir_all(&packs_dir).unwrap();
+
+    let mut writer_one = PackWriter::new();
+    let hash_one = writer_one.add(b"first-pack").unwrap();
+    writer_one.finish(&packs_dir).unwrap();
+
+    let mut writer_two = PackWriter::new();
+    let hash_two = writer_two.add(b"second-pack").unwrap();
+    writer_two.finish(&packs_dir).unwrap();
+
+    let pack_set = PackSet::open_all(&packs_dir).unwrap();
+
+    assert_eq!(pack_set.read(&hash_one).unwrap(), b"first-pack");
+    assert_eq!(pack_set.read(&hash_two).unwrap(), b"second-pack");
 }
