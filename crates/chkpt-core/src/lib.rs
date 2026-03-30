@@ -1,7 +1,7 @@
-pub mod error;
+pub mod attachments;
 pub mod config;
-pub mod scanner;
-pub mod store;
+pub mod error;
 pub mod index;
 pub mod ops;
-pub mod attachments;
+pub mod scanner;
+pub mod store;

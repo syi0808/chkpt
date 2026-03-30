@@ -1,9 +1,9 @@
-use chkpt_core::ops::save::{save, SaveOptions};
+use chkpt_core::ops::delete::delete;
 use chkpt_core::ops::list::list;
 use chkpt_core::ops::restore::{restore, RestoreOptions};
-use chkpt_core::ops::delete::delete;
-use tempfile::TempDir;
+use chkpt_core::ops::save::{save, SaveOptions};
 use std::fs;
+use tempfile::TempDir;
 
 #[test]
 fn test_delete_single_snapshot() {
@@ -58,8 +58,14 @@ fn test_delete_shared_objects_preserved() {
     fs::remove_file(workspace.path().join("shared.txt")).unwrap();
     fs::remove_file(workspace.path().join("extra.txt")).unwrap();
     restore(workspace.path(), &r2.snapshot_id, RestoreOptions::default()).unwrap();
-    assert_eq!(fs::read_to_string(workspace.path().join("shared.txt")).unwrap(), "shared content");
-    assert_eq!(fs::read_to_string(workspace.path().join("extra.txt")).unwrap(), "extra");
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("shared.txt")).unwrap(),
+        "shared content"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("extra.txt")).unwrap(),
+        "extra"
+    );
 }
 
 #[test]

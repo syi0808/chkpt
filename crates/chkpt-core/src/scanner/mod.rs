@@ -1,5 +1,5 @@
-pub mod walker;
 pub mod matcher;
+pub mod walker;
 
 use crate::error::Result;
 use std::path::Path;

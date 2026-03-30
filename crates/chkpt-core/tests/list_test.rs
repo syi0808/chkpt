@@ -1,7 +1,7 @@
-use chkpt_core::ops::save::{save, SaveOptions};
 use chkpt_core::ops::list::list;
-use tempfile::TempDir;
+use chkpt_core::ops::save::{save, SaveOptions};
 use std::fs;
+use tempfile::TempDir;
 
 #[test]
 fn test_list_empty() {

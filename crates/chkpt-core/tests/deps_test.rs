@@ -32,17 +32,9 @@ fn test_archive_and_restore_deps() {
     let dir = TempDir::new().unwrap();
     let node_modules = dir.path().join("node_modules");
     fs::create_dir_all(node_modules.join("pkg-a")).unwrap();
-    fs::write(
-        node_modules.join("pkg-a/index.js"),
-        "module.exports = 'a'",
-    )
-    .unwrap();
+    fs::write(node_modules.join("pkg-a/index.js"), "module.exports = 'a'").unwrap();
     fs::create_dir_all(node_modules.join("pkg-b")).unwrap();
-    fs::write(
-        node_modules.join("pkg-b/index.js"),
-        "module.exports = 'b'",
-    )
-    .unwrap();
+    fs::write(node_modules.join("pkg-b/index.js"), "module.exports = 'b'").unwrap();
 
     let archive_dir = dir.path().join("archives");
     fs::create_dir_all(&archive_dir).unwrap();

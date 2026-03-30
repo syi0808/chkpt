@@ -28,10 +28,7 @@ pub async fn deps_restore(
 }
 
 #[napi]
-pub async fn git_bundle_create(
-    repo_path: String,
-    archive_dir: String,
-) -> napi::Result<String> {
+pub async fn git_bundle_create(repo_path: String, archive_dir: String) -> napi::Result<String> {
     git::create_git_bundle(Path::new(&repo_path), Path::new(&archive_dir)).map_err(to_napi_error)
 }
 

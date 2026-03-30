@@ -1,4 +1,4 @@
-use chkpt_core::store::tree::{TreeEntry, EntryType, TreeStore};
+use chkpt_core::store::tree::{EntryType, TreeEntry, TreeStore};
 use tempfile::TempDir;
 
 #[test]
@@ -48,8 +48,20 @@ fn test_tree_sorts_entries() {
     let dir = TempDir::new().unwrap();
     let store = TreeStore::new(dir.path().to_path_buf());
     let entries = vec![
-        TreeEntry { name: "z".into(), entry_type: EntryType::File, hash: [0u8; 32], size: 0, mode: 0o644 },
-        TreeEntry { name: "a".into(), entry_type: EntryType::File, hash: [1u8; 32], size: 0, mode: 0o644 },
+        TreeEntry {
+            name: "z".into(),
+            entry_type: EntryType::File,
+            hash: [0u8; 32],
+            size: 0,
+            mode: 0o644,
+        },
+        TreeEntry {
+            name: "a".into(),
+            entry_type: EntryType::File,
+            hash: [1u8; 32],
+            size: 0,
+            mode: 0o644,
+        },
     ];
     let hash = store.write(&entries).unwrap();
     let read_back = store.read(&hash).unwrap();
@@ -62,8 +74,20 @@ fn test_tree_with_dir_entry() {
     let dir = TempDir::new().unwrap();
     let store = TreeStore::new(dir.path().to_path_buf());
     let entries = vec![
-        TreeEntry { name: "src".into(), entry_type: EntryType::Dir, hash: [5u8; 32], size: 0, mode: 0o755 },
-        TreeEntry { name: "README.md".into(), entry_type: EntryType::File, hash: [6u8; 32], size: 50, mode: 0o644 },
+        TreeEntry {
+            name: "src".into(),
+            entry_type: EntryType::Dir,
+            hash: [5u8; 32],
+            size: 0,
+            mode: 0o755,
+        },
+        TreeEntry {
+            name: "README.md".into(),
+            entry_type: EntryType::File,
+            hash: [6u8; 32],
+            size: 50,
+            mode: 0o644,
+        },
     ];
     let hash = store.write(&entries).unwrap();
     let read_back = store.read(&hash).unwrap();

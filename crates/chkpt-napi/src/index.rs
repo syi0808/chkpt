@@ -69,7 +69,9 @@ pub async fn index_lookup(db_path: String, path: String) -> napi::Result<Option<
     Ok(entry.as_ref().map(core_entry_to_js))
 }
 
-#[napi(ts_args_type = "dbPath: string, entries: Array<{ path: string, blobHash: string, size: number, mtimeSecs: number, mtimeNanos: number, inode: number | null, mode: number }>")]
+#[napi(
+    ts_args_type = "dbPath: string, entries: Array<{ path: string, blobHash: string, size: number, mtimeSecs: number, mtimeNanos: number, inode: number | null, mode: number }>"
+)]
 pub async fn index_upsert(db_path: String, entries: Vec<serde_json::Value>) -> napi::Result<()> {
     let idx = FileIndex::open(&db_path).map_err(to_napi_error)?;
     let core_entries: Vec<FileEntry> = entries

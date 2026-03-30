@@ -1,10 +1,9 @@
 use rmcp::{
-    ServerHandler, ServiceExt,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo, Implementation},
-    tool, tool_handler, tool_router,
-    schemars,
+    model::{Implementation, ServerCapabilities, ServerInfo},
+    schemars, tool, tool_handler, tool_router,
     transport::stdio,
+    ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
 
@@ -77,23 +76,19 @@ impl ChkpttServer {
             message: params.message,
         };
         match chkpt_core::ops::save::save(workspace_path, options) {
-            Ok(result) => {
-                serde_json::json!({
-                    "snapshot_id": result.snapshot_id,
-                    "stats": {
-                        "total_files": result.stats.total_files,
-                        "total_bytes": result.stats.total_bytes,
-                        "new_objects": result.stats.new_objects,
-                    }
-                })
-                .to_string()
-            }
-            Err(e) => {
-                serde_json::json!({
-                    "error": e.to_string()
-                })
-                .to_string()
-            }
+            Ok(result) => serde_json::json!({
+                "snapshot_id": result.snapshot_id,
+                "stats": {
+                    "total_files": result.stats.total_files,
+                    "total_bytes": result.stats.total_bytes,
+                    "new_objects": result.stats.new_objects,
+                }
+            })
+            .to_string(),
+            Err(e) => serde_json::json!({
+                "error": e.to_string()
+            })
+            .to_string(),
         }
     }
 
@@ -125,12 +120,10 @@ impl ChkpttServer {
                     .collect();
                 serde_json::json!(entries).to_string()
             }
-            Err(e) => {
-                serde_json::json!({
-                    "error": e.to_string()
-                })
-                .to_string()
-            }
+            Err(e) => serde_json::json!({
+                "error": e.to_string()
+            })
+            .to_string(),
         }
     }
 
@@ -148,22 +141,18 @@ impl ChkpttServer {
             dry_run: params.dry_run.unwrap_or(false),
         };
         match chkpt_core::ops::restore::restore(workspace_path, &params.snapshot_id, options) {
-            Ok(result) => {
-                serde_json::json!({
-                    "snapshot_id": result.snapshot_id,
-                    "files_added": result.files_added,
-                    "files_changed": result.files_changed,
-                    "files_removed": result.files_removed,
-                    "files_unchanged": result.files_unchanged,
-                })
-                .to_string()
-            }
-            Err(e) => {
-                serde_json::json!({
-                    "error": e.to_string()
-                })
-                .to_string()
-            }
+            Ok(result) => serde_json::json!({
+                "snapshot_id": result.snapshot_id,
+                "files_added": result.files_added,
+                "files_changed": result.files_changed,
+                "files_removed": result.files_removed,
+                "files_unchanged": result.files_unchanged,
+            })
+            .to_string(),
+            Err(e) => serde_json::json!({
+                "error": e.to_string()
+            })
+            .to_string(),
         }
     }
 
@@ -178,20 +167,16 @@ impl ChkpttServer {
     fn checkpoint_delete(&self, Parameters(params): Parameters<DeleteParams>) -> String {
         let workspace_path = Path::new(&params.workspace_path);
         match chkpt_core::ops::delete::delete(workspace_path, &params.snapshot_id) {
-            Ok(()) => {
-                serde_json::json!({
-                    "deleted": true,
-                    "snapshot_id": params.snapshot_id,
-                    "message": format!("Snapshot {} deleted successfully", params.snapshot_id),
-                })
-                .to_string()
-            }
-            Err(e) => {
-                serde_json::json!({
-                    "error": e.to_string()
-                })
-                .to_string()
-            }
+            Ok(()) => serde_json::json!({
+                "deleted": true,
+                "snapshot_id": params.snapshot_id,
+                "message": format!("Snapshot {} deleted successfully", params.snapshot_id),
+            })
+            .to_string(),
+            Err(e) => serde_json::json!({
+                "error": e.to_string()
+            })
+            .to_string(),
         }
     }
 }
@@ -201,9 +186,7 @@ impl ServerHandler for ChkpttServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: Default::default(),
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {
                 name: "chkpt".to_string(),
                 title: Some("chkpt - Workspace Checkpoint Manager".to_string()),

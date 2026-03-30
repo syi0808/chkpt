@@ -2,12 +2,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::path::Path;
 
 /// Built-in directories that are always excluded from scanning.
-const BUILTIN_EXCLUSIONS: &[&str] = &[
-    ".git/",
-    "node_modules/",
-    ".chkpt/",
-    "target/",
-];
+const BUILTIN_EXCLUSIONS: &[&str] = &[".git/", "node_modules/", ".chkpt/", "target/"];
 
 /// Matcher that combines built-in exclusions with .chkptignore patterns.
 pub struct IgnoreMatcher {
@@ -51,9 +46,7 @@ impl IgnoreMatcher {
         for exclusion in BUILTIN_EXCLUSIONS {
             let dir_name = exclusion.trim_end_matches('/');
             // Match the directory itself or any path starting with it
-            if relative_path == dir_name
-                || relative_path.starts_with(&format!("{}/", dir_name))
-            {
+            if relative_path == dir_name || relative_path.starts_with(&format!("{}/", dir_name)) {
                 return true;
             }
         }
@@ -73,8 +66,8 @@ impl IgnoreMatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_builtin_exclusions() {

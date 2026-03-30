@@ -1,6 +1,6 @@
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
-use anyhow::{Result, bail};
-use dialoguer::{Select, theme::ColorfulTheme};
+use dialoguer::{theme::ColorfulTheme, Select};
 
 #[derive(Parser)]
 #[command(name = "chkpt", about = "Filesystem checkpoint engine")]

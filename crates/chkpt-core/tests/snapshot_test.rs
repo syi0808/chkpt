@@ -1,4 +1,4 @@
-use chkpt_core::store::snapshot::{Snapshot, SnapshotStore, SnapshotAttachments, SnapshotStats};
+use chkpt_core::store::snapshot::{Snapshot, SnapshotAttachments, SnapshotStats, SnapshotStore};
 use tempfile::TempDir;
 
 #[test]
@@ -10,7 +10,11 @@ fn test_snapshot_save_and_load() {
         [0u8; 32],
         None,
         SnapshotAttachments::default(),
-        SnapshotStats { total_files: 10, total_bytes: 1000, new_objects: 5 },
+        SnapshotStats {
+            total_files: 10,
+            total_bytes: 1000,
+            new_objects: 5,
+        },
     );
     let id = snap.id.clone();
     store.save(&snap).unwrap();
@@ -30,7 +34,11 @@ fn test_snapshot_list_sorted() {
             [i as u8; 32],
             None,
             SnapshotAttachments::default(),
-            SnapshotStats { total_files: 0, total_bytes: 0, new_objects: 0 },
+            SnapshotStats {
+                total_files: 0,
+                total_bytes: 0,
+                new_objects: 0,
+            },
         );
         store.save(&snap).unwrap();
     }
@@ -44,8 +52,17 @@ fn test_snapshot_list_sorted() {
 fn test_snapshot_delete() {
     let dir = TempDir::new().unwrap();
     let store = SnapshotStore::new(dir.path().to_path_buf());
-    let snap = Snapshot::new(None, [0u8; 32], None, SnapshotAttachments::default(),
-        SnapshotStats { total_files: 0, total_bytes: 0, new_objects: 0 });
+    let snap = Snapshot::new(
+        None,
+        [0u8; 32],
+        None,
+        SnapshotAttachments::default(),
+        SnapshotStats {
+            total_files: 0,
+            total_bytes: 0,
+            new_objects: 0,
+        },
+    );
     let id = snap.id.clone();
     store.save(&snap).unwrap();
     store.delete(&id).unwrap();
@@ -57,8 +74,17 @@ fn test_snapshot_list_with_limit() {
     let dir = TempDir::new().unwrap();
     let store = SnapshotStore::new(dir.path().to_path_buf());
     for _ in 0..5 {
-        let snap = Snapshot::new(None, [0u8; 32], None, SnapshotAttachments::default(),
-            SnapshotStats { total_files: 0, total_bytes: 0, new_objects: 0 });
+        let snap = Snapshot::new(
+            None,
+            [0u8; 32],
+            None,
+            SnapshotAttachments::default(),
+            SnapshotStats {
+                total_files: 0,
+                total_bytes: 0,
+                new_objects: 0,
+            },
+        );
         store.save(&snap).unwrap();
     }
     let list = store.list(Some(3)).unwrap();
@@ -69,14 +95,30 @@ fn test_snapshot_list_with_limit() {
 fn test_snapshot_latest() {
     let dir = TempDir::new().unwrap();
     let store = SnapshotStore::new(dir.path().to_path_buf());
-    let snap1 = Snapshot::new(Some("first".into()), [1u8; 32], None,
+    let snap1 = Snapshot::new(
+        Some("first".into()),
+        [1u8; 32],
+        None,
         SnapshotAttachments::default(),
-        SnapshotStats { total_files: 0, total_bytes: 0, new_objects: 0 });
+        SnapshotStats {
+            total_files: 0,
+            total_bytes: 0,
+            new_objects: 0,
+        },
+    );
     store.save(&snap1).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(10));
-    let snap2 = Snapshot::new(Some("second".into()), [2u8; 32], None,
+    let snap2 = Snapshot::new(
+        Some("second".into()),
+        [2u8; 32],
+        None,
         SnapshotAttachments::default(),
-        SnapshotStats { total_files: 0, total_bytes: 0, new_objects: 0 });
+        SnapshotStats {
+            total_files: 0,
+            total_bytes: 0,
+            new_objects: 0,
+        },
+    );
     let id2 = snap2.id.clone();
     store.save(&snap2).unwrap();
     let latest = store.latest().unwrap().unwrap();

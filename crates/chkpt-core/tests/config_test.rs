@@ -1,4 +1,4 @@
-use chkpt_core::config::{project_id_from_path, ProjectConfig, Guardrails, StoreLayout};
+use chkpt_core::config::{project_id_from_path, Guardrails, ProjectConfig, StoreLayout};
 use std::path::PathBuf;
 use tempfile::TempDir;
 

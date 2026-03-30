@@ -33,12 +33,7 @@ fn test_e2e_save_list_restore() {
     fs::write(workspace.path().join("new.txt"), "new file").unwrap();
 
     // Restore
-    let rr = restore(
-        workspace.path(),
-        &r.snapshot_id,
-        RestoreOptions::default(),
-    )
-    .unwrap();
+    let rr = restore(workspace.path(), &r.snapshot_id, RestoreOptions::default()).unwrap();
     assert!(rr.files_changed > 0 || rr.files_removed > 0);
 
     // Verify restored state matches original
@@ -80,12 +75,7 @@ fn test_e2e_multiple_saves_selective_restore() {
     fs::write(workspace.path().join("a.txt"), "version 3").unwrap();
 
     // Restore to v1
-    restore(
-        workspace.path(),
-        &r1.snapshot_id,
-        RestoreOptions::default(),
-    )
-    .unwrap();
+    restore(workspace.path(), &r1.snapshot_id, RestoreOptions::default()).unwrap();
     assert_eq!(
         fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
         "version 1"
@@ -93,12 +83,7 @@ fn test_e2e_multiple_saves_selective_restore() {
     assert!(!workspace.path().join("b.txt").exists());
 
     // Restore to v2
-    restore(
-        workspace.path(),
-        &r2.snapshot_id,
-        RestoreOptions::default(),
-    )
-    .unwrap();
+    restore(workspace.path(), &r2.snapshot_id, RestoreOptions::default()).unwrap();
     assert_eq!(
         fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
         "version 2"
@@ -131,12 +116,7 @@ fn test_e2e_delete_gc_preserves_valid() {
     // Remove files from workspace, then restore from the surviving snapshot
     fs::remove_file(workspace.path().join("shared.txt")).unwrap();
     fs::remove_file(workspace.path().join("unique.txt")).unwrap();
-    restore(
-        workspace.path(),
-        &r2.snapshot_id,
-        RestoreOptions::default(),
-    )
-    .unwrap();
+    restore(workspace.path(), &r2.snapshot_id, RestoreOptions::default()).unwrap();
     assert_eq!(
         fs::read_to_string(workspace.path().join("shared.txt")).unwrap(),
         "shared content"
@@ -213,12 +193,7 @@ fn test_e2e_many_files() {
     assert_eq!(r3.stats.new_objects, 10);
 
     // Restore to original
-    restore(
-        workspace.path(),
-        &r.snapshot_id,
-        RestoreOptions::default(),
-    )
-    .unwrap();
+    restore(workspace.path(), &r.snapshot_id, RestoreOptions::default()).unwrap();
 
     // Verify a few files
     let content = fs::read_to_string(workspace.path().join("dir_0/file_0.txt")).unwrap();
@@ -257,12 +232,7 @@ fn test_e2e_empty_workspace() {
     assert_eq!(snaps.len(), 1);
 
     // Should be restorable (no-op)
-    let rr = restore(
-        workspace.path(),
-        &r.snapshot_id,
-        RestoreOptions::default(),
-    )
-    .unwrap();
+    let rr = restore(workspace.path(), &r.snapshot_id, RestoreOptions::default()).unwrap();
     assert_eq!(rr.files_added, 0);
     assert_eq!(rr.files_changed, 0);
     assert_eq!(rr.files_removed, 0);

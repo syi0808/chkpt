@@ -56,14 +56,12 @@ fn bytes32_to_hex(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-#[napi(ts_return_type = "Array<{ id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, stats: { totalFiles: number, totalBytes: number, newObjects: number } }>")]
-pub async fn list(
-    workspace_path: String,
-    limit: Option<u32>,
-) -> napi::Result<serde_json::Value> {
+#[napi(
+    ts_return_type = "Array<{ id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, stats: { totalFiles: number, totalBytes: number, newObjects: number } }>"
+)]
+pub async fn list(workspace_path: String, limit: Option<u32>) -> napi::Result<serde_json::Value> {
     let root = PathBuf::from(workspace_path);
-    let snapshots =
-        ops_list::list(&root, limit.map(|l| l as usize)).map_err(to_napi_error)?;
+    let snapshots = ops_list::list(&root, limit.map(|l| l as usize)).map_err(to_napi_error)?;
     let serde_snaps: Vec<SerdeListSnapshot> = snapshots
         .iter()
         .map(|s| SerdeListSnapshot {
@@ -108,8 +106,7 @@ pub async fn restore(
     let options = RestoreOptions {
         dry_run: dry_run.unwrap_or(false),
     };
-    let result =
-        restore::restore(&root, &snapshot_id, options).map_err(to_napi_error)?;
+    let result = restore::restore(&root, &snapshot_id, options).map_err(to_napi_error)?;
     Ok(JsRestoreResult {
         snapshot_id: result.snapshot_id,
         files_added: result.files_added as i64,
@@ -122,10 +119,7 @@ pub async fn restore(
 // ── delete ──────────────────────────────────────────────────────────
 
 #[napi]
-pub async fn delete_snapshot(
-    workspace_path: String,
-    snapshot_id: String,
-) -> napi::Result<()> {
+pub async fn delete_snapshot(workspace_path: String, snapshot_id: String) -> napi::Result<()> {
     let root = PathBuf::from(workspace_path);
     delete::delete(&root, &snapshot_id).map_err(to_napi_error)?;
     Ok(())

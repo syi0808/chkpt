@@ -1,8 +1,6 @@
 use crate::error::to_napi_error;
 use chkpt_core::store::blob::{hash_content, BlobStore};
-use chkpt_core::store::snapshot::{
-    Snapshot, SnapshotAttachments, SnapshotStats, SnapshotStore,
-};
+use chkpt_core::store::snapshot::{Snapshot, SnapshotAttachments, SnapshotStats, SnapshotStore};
 use chkpt_core::store::tree::{EntryType, TreeEntry, TreeStore};
 use chrono::DateTime;
 use napi::bindgen_prelude::*;
@@ -132,10 +130,7 @@ pub async fn tree_build(
 }
 
 #[napi]
-pub async fn tree_load(
-    trees_dir: String,
-    hash: String,
-) -> napi::Result<Vec<JsTreeEntry>> {
+pub async fn tree_load(trees_dir: String, hash: String) -> napi::Result<Vec<JsTreeEntry>> {
     let store = TreeStore::new(PathBuf::from(trees_dir));
     let entries = store.read(&hash).map_err(to_napi_error)?;
     Ok(entries.iter().map(tree_entry_to_js).collect())
@@ -223,7 +218,9 @@ fn core_snapshot_to_serde(snap: &Snapshot) -> SerdeSnapshot {
     }
 }
 
-#[napi(ts_args_type = "snapshotsDir: string, snap: { id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null, gitKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }")]
+#[napi(
+    ts_args_type = "snapshotsDir: string, snap: { id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null, gitKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }"
+)]
 pub async fn snapshot_save(snapshots_dir: String, snap: serde_json::Value) -> napi::Result<()> {
     let serde_snap: SerdeSnapshot = serde_json::from_value(snap).map_err(|e| {
         napi::Error::new(napi::Status::InvalidArg, format!("invalid snapshot: {}", e))
@@ -234,22 +231,32 @@ pub async fn snapshot_save(snapshots_dir: String, snap: serde_json::Value) -> na
     Ok(())
 }
 
-#[napi(ts_return_type = "{ id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null, gitKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }")]
+#[napi(
+    ts_return_type = "{ id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null, gitKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }"
+)]
 pub async fn snapshot_load(snapshots_dir: String, id: String) -> napi::Result<serde_json::Value> {
     let store = SnapshotStore::new(PathBuf::from(snapshots_dir));
     let snap = store.load(&id).map_err(to_napi_error)?;
     let serde_snap = core_snapshot_to_serde(&snap);
     serde_json::to_value(&serde_snap).map_err(|e| {
-        napi::Error::new(napi::Status::GenericFailure, format!("serialization error: {}", e))
+        napi::Error::new(
+            napi::Status::GenericFailure,
+            format!("serialization error: {}", e),
+        )
     })
 }
 
-#[napi(ts_return_type = "Array<{ id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null, gitKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }>")]
+#[napi(
+    ts_return_type = "Array<{ id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null, gitKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }>"
+)]
 pub async fn snapshot_list(snapshots_dir: String) -> napi::Result<serde_json::Value> {
     let store = SnapshotStore::new(PathBuf::from(snapshots_dir));
     let snaps = store.list(None).map_err(to_napi_error)?;
     let serde_snaps: Vec<SerdeSnapshot> = snaps.iter().map(core_snapshot_to_serde).collect();
     serde_json::to_value(&serde_snaps).map_err(|e| {
-        napi::Error::new(napi::Status::GenericFailure, format!("serialization error: {}", e))
+        napi::Error::new(
+            napi::Status::GenericFailure,
+            format!("serialization error: {}", e),
+        )
     })
 }
