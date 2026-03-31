@@ -10,6 +10,7 @@ use crate::store::snapshot::SnapshotStore;
 use crate::store::tree::{EntryType, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ops::progress::{emit, ProgressCallback, ProgressEvent};
 
@@ -92,6 +93,93 @@ fn scan_current_state(
         state.insert(file.relative_path.clone(), CurrentFileState { hash_hex });
     }
     Ok(state)
+}
+
+fn restore_files(
+    workspace_root: &Path,
+    restore_tasks: &[(String, String)],
+    blob_store: &BlobStore,
+    pack_set: &PackSet,
+    progress: &ProgressCallback,
+    progress_counter: &AtomicU64,
+    restore_total: u64,
+) -> Result<Vec<String>> {
+    if restore_tasks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let worker_count = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .min(restore_tasks.len());
+    if worker_count <= 1 {
+        let mut restored = Vec::with_capacity(restore_tasks.len());
+        for (path, blob_hash_hex) in restore_tasks {
+            let content = if blob_store.exists(blob_hash_hex) {
+                blob_store.read(blob_hash_hex)?
+            } else {
+                read_object_from_pack_set(pack_set, blob_hash_hex)?
+            };
+            let file_path = workspace_root.join(path);
+            if let Some(parent) = file_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&file_path, &content)?;
+            let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            emit(
+                progress,
+                ProgressEvent::RestoreFile {
+                    completed,
+                    total: restore_total,
+                },
+            );
+            restored.push(path.clone());
+        }
+        return Ok(restored);
+    }
+
+    let chunk_size = restore_tasks.len().div_ceil(worker_count);
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = restore_tasks
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || -> Result<Vec<String>> {
+                    let mut restored = Vec::with_capacity(chunk.len());
+                    for (path, blob_hash_hex) in chunk {
+                        let content = if blob_store.exists(blob_hash_hex) {
+                            blob_store.read(blob_hash_hex)?
+                        } else {
+                            read_object_from_pack_set(pack_set, blob_hash_hex)?
+                        };
+                        let file_path = workspace_root.join(path);
+                        if let Some(parent) = file_path.parent() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                        std::fs::write(&file_path, &content)?;
+                        let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                        emit(
+                            progress,
+                            ProgressEvent::RestoreFile {
+                                completed,
+                                total: restore_total,
+                            },
+                        );
+                        restored.push(path.clone());
+                    }
+                    Ok(restored)
+                })
+            })
+            .collect();
+
+        let mut restored_paths = Vec::with_capacity(restore_tasks.len());
+        for worker in workers {
+            let chunk = worker
+                .join()
+                .map_err(|_| ChkpttError::Other("restore worker thread panicked".into()))??;
+            restored_paths.extend(chunk);
+        }
+        Ok(restored_paths)
+    })
 }
 
 /// Restore workspace to a snapshot state.
@@ -220,32 +308,22 @@ pub fn restore(
         },
     );
 
-    // 8a. Restore files that need to be added or changed
-    let mut restore_completed: u64 = 0;
-    for path in files_to_add.iter().chain(files_to_change.iter()) {
-        let blob_hash_hex = &target_state[*path];
-        let content = if blob_store.exists(blob_hash_hex) {
-            blob_store.read(blob_hash_hex)?
-        } else {
-            read_object_from_pack_set(&pack_set, blob_hash_hex)?
-        };
-        let file_path = workspace_root.join(path);
-
-        // Create parent directories if they don't exist
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        std::fs::write(&file_path, &content)?;
-        restore_completed += 1;
-        emit(
-            &options.progress,
-            ProgressEvent::RestoreFile {
-                completed: restore_completed,
-                total: restore_total,
-            },
-        );
-    }
+    // 8a. Restore files that need to be added or changed (parallel)
+    let restore_tasks: Vec<(String, String)> = files_to_add
+        .iter()
+        .chain(files_to_change.iter())
+        .map(|path| ((*path).clone(), target_state[*path].clone()))
+        .collect();
+    let restore_progress = AtomicU64::new(0);
+    let restored_paths = restore_files(
+        workspace_root,
+        &restore_tasks,
+        &blob_store,
+        &pack_set,
+        &options.progress,
+        &restore_progress,
+        restore_total,
+    )?;
 
     // 8b. Remove files that are not in the target snapshot
     for path in &files_to_remove {
@@ -253,11 +331,11 @@ pub fn restore(
         if file_path.exists() {
             std::fs::remove_file(&file_path)?;
         }
-        restore_completed += 1;
+        let completed = restore_progress.fetch_add(1, Ordering::Relaxed) + 1;
         emit(
             &options.progress,
             ProgressEvent::RestoreFile {
-                completed: restore_completed,
+                completed,
                 total: restore_total,
             },
         );
@@ -267,11 +345,6 @@ pub fn restore(
     cleanup_empty_dirs(workspace_root)?;
 
     let removed_paths: Vec<String> = files_to_remove.into_iter().cloned().collect();
-    let restored_paths: Vec<String> = files_to_add
-        .iter()
-        .chain(files_to_change.iter())
-        .map(|path| (*path).clone())
-        .collect();
     let file_entries = restored_index_entries(workspace_root, &restored_paths, &target_state)?;
     index.apply_changes(&removed_paths, &file_entries)?;
 

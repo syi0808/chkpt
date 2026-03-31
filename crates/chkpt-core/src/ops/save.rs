@@ -333,6 +333,7 @@ fn cached_processed_file(
 fn prepare_file(
     scanned: &ScannedFile,
     seen_hashes: &Mutex<HashSet<[u8; 32]>>,
+    compressor: &mut zstd::bulk::Compressor<'_>,
 ) -> Result<PreparedFile> {
     // Read file with pre-allocated buffer (skip fstat overhead of fs::read)
     let content = {
@@ -354,7 +355,7 @@ fn prepare_file(
     };
 
     let compressed = if is_new {
-        Some(zstd::encode_all(&content[..], 1)?)
+        Some(compress_with_worker_context(&content, compressor)?)
     } else {
         None
     };
@@ -373,6 +374,13 @@ fn prepare_file(
         mtime_nanos: scanned.mtime_nanos,
         inode: scanned.inode,
     })
+}
+
+fn compress_with_worker_context(
+    content: &[u8],
+    compressor: &mut zstd::bulk::Compressor<'_>,
+) -> Result<Vec<u8>> {
+    Ok(compressor.compress(content)?)
 }
 
 /// Prepare files in parallel batches.
@@ -395,21 +403,21 @@ fn prepare_files_batch(
         .min(scanned_files.len());
 
     if worker_count <= 1 {
-        return scanned_files
-            .iter()
-            .map(|s| {
-                let result = prepare_file(s, seen_hashes);
-                let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                emit(
-                    progress,
-                    ProgressEvent::ProcessFile {
-                        completed,
-                        total: total_to_process,
-                    },
-                );
-                result
-            })
-            .collect();
+        let mut compressor = zstd::bulk::Compressor::new(1)?;
+        let mut prepared = Vec::with_capacity(scanned_files.len());
+        for scanned in scanned_files {
+            let result = prepare_file(scanned, seen_hashes, &mut compressor);
+            let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            emit(
+                progress,
+                ProgressEvent::ProcessFile {
+                    completed,
+                    total: total_to_process,
+                },
+            );
+            prepared.push(result?);
+        }
+        return Ok(prepared);
     }
 
     let chunk_size = scanned_files.len().div_ceil(worker_count);
@@ -418,22 +426,25 @@ fn prepare_files_batch(
         let handles: Vec<_> = scanned_files
             .chunks(chunk_size)
             .map(|chunk| {
-                scope.spawn(|| {
-                    chunk
-                        .iter()
-                        .map(|scanned| {
-                            let result = prepare_file(scanned, seen_hashes);
-                            let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
-                            emit(
-                                progress,
-                                ProgressEvent::ProcessFile {
-                                    completed,
-                                    total: total_to_process,
-                                },
-                            );
-                            result
-                        })
-                        .collect::<Vec<_>>()
+                scope.spawn(move || {
+                    let mut compressor = match zstd::bulk::Compressor::new(1) {
+                        Ok(compressor) => compressor,
+                        Err(error) => return vec![Err(error.into())],
+                    };
+                    let mut prepared = Vec::with_capacity(chunk.len());
+                    for scanned in chunk {
+                        let result = prepare_file(scanned, seen_hashes, &mut compressor);
+                        let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                        emit(
+                            progress,
+                            ProgressEvent::ProcessFile {
+                                completed,
+                                total: total_to_process,
+                            },
+                        );
+                        prepared.push(result);
+                    }
+                    prepared
                 })
             })
             .collect();
@@ -623,5 +634,16 @@ mod tests {
         std::fs::write(packs_dir.join("pack-demo.dat"), b"pack").unwrap();
 
         assert!(store_has_external_objects(&objects_dir, &packs_dir).unwrap());
+    }
+
+    #[test]
+    fn test_compress_with_worker_context_roundtrip() {
+        let content = b"compression-context-roundtrip-data";
+        let mut compressor = zstd::bulk::Compressor::new(1).unwrap();
+
+        let compressed = compress_with_worker_context(content, &mut compressor).unwrap();
+        let decompressed = zstd::decode_all(&compressed[..]).unwrap();
+
+        assert_eq!(decompressed, content);
     }
 }
