@@ -1,4 +1,5 @@
-use chkpt_core::store::blob::BlobStore;
+use chkpt_core::store::blob::{hash_content, hash_file, BlobStore};
+use std::fs;
 use tempfile::TempDir;
 
 #[test]
@@ -57,6 +58,16 @@ fn test_blob_exists() {
 fn test_hash_content_without_storing() {
     let hash = chkpt_core::store::blob::hash_content(b"test");
     assert_eq!(hash.len(), 64); // 64 hex chars
+}
+
+#[test]
+fn test_hash_file_matches_hash_content() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("large.txt");
+    let content = "stream me ".repeat(4096);
+    fs::write(&path, &content).unwrap();
+
+    assert_eq!(hash_file(&path).unwrap(), hash_content(content.as_bytes()));
 }
 
 #[test]

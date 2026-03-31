@@ -96,7 +96,7 @@ impl SnapshotStore {
         for entry in std::fs::read_dir(&self.dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "json") {
+            if path.extension().is_some_and(|e| e == "json") {
                 let json = std::fs::read_to_string(&path)?;
                 if let Ok(snap) = serde_json::from_str::<Snapshot>(&json) {
                     snapshots.push(snap);

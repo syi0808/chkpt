@@ -102,3 +102,35 @@ fn test_save_after_restore_stays_incremental() {
     let resaved = save(workspace.path(), SaveOptions::default()).unwrap();
     assert_eq!(resaved.stats.new_objects, 0);
 }
+
+#[test]
+fn test_restore_after_add_remove_change_keeps_follow_up_save_incremental() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("keep.txt"), "keep-v1").unwrap();
+    fs::write(workspace.path().join("remove.txt"), "remove-v1").unwrap();
+    let snapshot = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    fs::write(workspace.path().join("keep.txt"), "keep-v2").unwrap();
+    fs::remove_file(workspace.path().join("remove.txt")).unwrap();
+    fs::write(workspace.path().join("new.txt"), "new-v1").unwrap();
+
+    restore(
+        workspace.path(),
+        &snapshot.snapshot_id,
+        RestoreOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("keep.txt")).unwrap(),
+        "keep-v1"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("remove.txt")).unwrap(),
+        "remove-v1"
+    );
+    assert!(!workspace.path().join("new.txt").exists());
+
+    let resaved = save(workspace.path(), SaveOptions::default()).unwrap();
+    assert_eq!(resaved.stats.new_objects, 0);
+}

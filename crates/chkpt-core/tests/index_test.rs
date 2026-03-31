@@ -158,3 +158,51 @@ fn test_index_entries_by_path() {
     assert_eq!(entries["a.txt"].blob_hash, [1u8; 32]);
     assert_eq!(entries["b.txt"].size, 2);
 }
+
+#[test]
+fn test_index_apply_changes_updates_and_removes_in_one_call() {
+    let dir = TempDir::new().unwrap();
+    let idx = FileIndex::open(dir.path().join("index.sqlite")).unwrap();
+
+    idx.bulk_upsert(&[
+        FileEntry {
+            path: "keep.txt".into(),
+            blob_hash: [1u8; 32],
+            size: 1,
+            mtime_secs: 1,
+            mtime_nanos: 0,
+            inode: Some(10),
+            mode: 0o644,
+        },
+        FileEntry {
+            path: "remove.txt".into(),
+            blob_hash: [2u8; 32],
+            size: 2,
+            mtime_secs: 2,
+            mtime_nanos: 0,
+            inode: Some(11),
+            mode: 0o644,
+        },
+    ])
+    .unwrap();
+
+    idx.apply_changes(
+        &[String::from("remove.txt")],
+        &[FileEntry {
+            path: "keep.txt".into(),
+            blob_hash: [3u8; 32],
+            size: 3,
+            mtime_secs: 3,
+            mtime_nanos: 0,
+            inode: Some(10),
+            mode: 0o755,
+        }],
+    )
+    .unwrap();
+
+    let entries = idx.entries_by_path().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries["keep.txt"].blob_hash, [3u8; 32]);
+    assert_eq!(entries["keep.txt"].mode, 0o755);
+    assert!(!entries.contains_key("remove.txt"));
+}

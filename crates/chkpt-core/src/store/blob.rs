@@ -1,9 +1,29 @@
 use crate::error::{ChkpttError, Result};
+use std::io::{BufReader, Read};
+use std::path::Path;
 use std::path::PathBuf;
 
 /// Compute BLAKE3 hash of content, return 64-char hex string.
 pub fn hash_content(content: &[u8]) -> String {
     blake3::hash(content).to_hex().to_string()
+}
+
+/// Compute BLAKE3 hash of a file without loading the full file into memory.
+pub fn hash_file(path: &Path) -> Result<String> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 pub struct BlobStore {
@@ -60,7 +80,7 @@ impl BlobStore {
 
     /// Write content if the object is not already present.
     pub fn write_if_missing(&self, hash_hex: &str, content: &[u8]) -> Result<bool> {
-        let compressed = zstd::encode_all(&content[..], 3)?;
+        let compressed = zstd::encode_all(content, 3)?;
         self.write_precompressed_if_missing(hash_hex, &compressed)
     }
 

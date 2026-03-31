@@ -92,14 +92,17 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     let mut files_to_prepare = Vec::new();
     let mut updated_entries = Vec::new();
     let mut total_bytes: u64 = 0;
-    let mut current_paths = (!cached_entries.is_empty()).then(|| HashSet::with_capacity(scanned_files.len()));
+    let mut current_paths =
+        (!cached_entries.is_empty()).then(|| HashSet::with_capacity(scanned_files.len()));
 
     for scanned in &scanned_files {
         if let Some(paths) = current_paths.as_mut() {
             paths.insert(scanned.relative_path.clone());
         }
 
-        if let Some(processed) = cached_processed_file(scanned, cached_entries.get(&scanned.relative_path)) {
+        if let Some(processed) =
+            cached_processed_file(scanned, cached_entries.get(&scanned.relative_path))
+        {
             total_bytes += processed.size;
             processed_files.push(processed);
         } else {
@@ -190,8 +193,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     snapshot_store.save(&snapshot)?;
 
     // 12. Update only changed index entries and remove stale paths.
-    index.bulk_remove(&removed_paths)?;
-    index.bulk_upsert(&updated_entries)?;
+    index.apply_changes(&removed_paths, &updated_entries)?;
 
     // 13. Lock released automatically via drop
 

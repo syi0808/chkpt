@@ -17,5 +17,13 @@ pub struct ScannedFile {
 
 /// Scan workspace, respecting .chkptignore and built-in exclusions.
 pub fn scan_workspace(root: &Path, chkptignore: Option<&Path>) -> Result<Vec<ScannedFile>> {
-    walker::walk(root, chkptignore)
+    scan_workspace_parallel(root, chkptignore)
+}
+
+/// Scan workspace using the parallel walker.
+pub fn scan_workspace_parallel(
+    root: &Path,
+    chkptignore: Option<&Path>,
+) -> Result<Vec<ScannedFile>> {
+    walker::walk_parallel(root, chkptignore)
 }

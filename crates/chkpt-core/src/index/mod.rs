@@ -65,44 +65,51 @@ impl FileIndex {
     }
 
     pub fn bulk_upsert(&self, entries: &[FileEntry]) -> Result<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        let tx = self.conn.unchecked_transaction()?;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO file_index (path, blob_hash, size, mtime_secs, mtime_nanos, inode, mode)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                 ON CONFLICT(path) DO UPDATE SET
-                    blob_hash=excluded.blob_hash, size=excluded.size,
-                    mtime_secs=excluded.mtime_secs, mtime_nanos=excluded.mtime_nanos,
-                    inode=excluded.inode, mode=excluded.mode",
-            )?;
-            for entry in entries {
-                stmt.execute(params![
-                    entry.path,
-                    entry.blob_hash.as_slice(),
-                    entry.size as i64,
-                    entry.mtime_secs,
-                    entry.mtime_nanos,
-                    entry.inode.map(|i| i as i64),
-                    entry.mode,
-                ])?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
+        self.apply_changes(&[], entries)
     }
 
     pub fn bulk_remove(&self, paths: &[String]) -> Result<()> {
-        if paths.is_empty() {
+        self.apply_changes(paths, &[])
+    }
+
+    pub fn apply_changes(
+        &self,
+        paths_to_remove: &[String],
+        entries_to_upsert: &[FileEntry],
+    ) -> Result<()> {
+        if paths_to_remove.is_empty() && entries_to_upsert.is_empty() {
             return Ok(());
         }
+
         let tx = self.conn.unchecked_transaction()?;
         {
-            let mut stmt = tx.prepare("DELETE FROM file_index WHERE path = ?1")?;
-            for path in paths {
-                stmt.execute(params![path])?;
+            if !paths_to_remove.is_empty() {
+                let mut delete_stmt = tx.prepare("DELETE FROM file_index WHERE path = ?1")?;
+                for path in paths_to_remove {
+                    delete_stmt.execute(params![path])?;
+                }
+            }
+
+            if !entries_to_upsert.is_empty() {
+                let mut upsert_stmt = tx.prepare(
+                    "INSERT INTO file_index (path, blob_hash, size, mtime_secs, mtime_nanos, inode, mode)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(path) DO UPDATE SET
+                        blob_hash=excluded.blob_hash, size=excluded.size,
+                        mtime_secs=excluded.mtime_secs, mtime_nanos=excluded.mtime_nanos,
+                        inode=excluded.inode, mode=excluded.mode",
+                )?;
+                for entry in entries_to_upsert {
+                    upsert_stmt.execute(params![
+                        entry.path,
+                        entry.blob_hash.as_slice(),
+                        entry.size as i64,
+                        entry.mtime_secs,
+                        entry.mtime_nanos,
+                        entry.inode.map(|i| i as i64),
+                        entry.mode,
+                    ])?;
+                }
             }
         }
         tx.commit()?;
@@ -113,9 +120,7 @@ impl FileIndex {
         let mut stmt = self.conn.prepare(
             "SELECT path, blob_hash, size, mtime_secs, mtime_nanos, inode, mode FROM file_index WHERE path = ?1"
         )?;
-        let result = stmt
-            .query_row(params![path], row_to_entry)
-            .optional()?;
+        let result = stmt.query_row(params![path], row_to_entry).optional()?;
         Ok(result)
     }
 

@@ -47,10 +47,11 @@ pub fn walk_parallel(root: &Path, chkptignore_override: Option<&Path>) -> Result
     let error = Arc::new(Mutex::new(None));
 
     let mut builder = build_walk_builder(root.as_path(), matcher);
-    builder
-        .standard_filters(false)
-        .follow_links(false)
-        .threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0));
+    builder.standard_filters(false).follow_links(false).threads(
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0),
+    );
 
     let mut visitor_builder = CollectBuilder {
         root: Arc::clone(&root),

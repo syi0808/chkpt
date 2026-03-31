@@ -50,7 +50,6 @@ fn test_save_with_message() {
 
     let opts = SaveOptions {
         message: Some("my checkpoint".into()),
-        ..Default::default()
     };
     let result = save(workspace.path(), opts).unwrap();
     assert!(!result.snapshot_id.is_empty());

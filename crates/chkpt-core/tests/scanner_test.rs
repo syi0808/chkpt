@@ -99,3 +99,21 @@ fn test_parallel_walk_matches_scan_workspace() {
 
     assert_eq!(parallel_paths, standard_paths);
 }
+
+#[test]
+fn test_parallel_scan_entrypoint_matches_sequential_walk() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    fs::write(dir.path().join("src/nested/main.rs"), "fn main(){}").unwrap();
+    fs::write(dir.path().join(".chkptignore"), "*.tmp\n").unwrap();
+    fs::write(dir.path().join("skip.tmp"), "ignore me").unwrap();
+
+    let sequential = chkpt_core::scanner::walker::walk(dir.path(), None).unwrap();
+    let parallel = chkpt_core::scanner::scan_workspace_parallel(dir.path(), None).unwrap();
+
+    let sequential_paths: Vec<_> = sequential.iter().map(|f| f.relative_path.clone()).collect();
+    let parallel_paths: Vec<_> = parallel.iter().map(|f| f.relative_path.clone()).collect();
+
+    assert_eq!(parallel_paths, sequential_paths);
+}
