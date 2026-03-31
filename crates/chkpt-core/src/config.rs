@@ -91,6 +91,17 @@ impl StoreLayout {
         ] {
             std::fs::create_dir_all(dir)?;
         }
+
+        // Prevent macOS Spotlight from indexing the store directory.
+        // mdworker_shared processes spike CPU after bulk writes without this.
+        #[cfg(target_os = "macos")]
+        {
+            let marker = self.base.join(".metadata_never_index");
+            if !marker.exists() {
+                std::fs::File::create(marker)?;
+            }
+        }
+
         Ok(())
     }
 }
