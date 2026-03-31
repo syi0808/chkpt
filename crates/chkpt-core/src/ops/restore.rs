@@ -8,7 +8,7 @@ use crate::store::blob::{hash_file, BlobStore};
 use crate::store::pack::{read_object_from_pack_set, PackSet};
 use crate::store::snapshot::SnapshotStore;
 use crate::store::tree::{EntryType, TreeStore};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -31,6 +31,13 @@ pub struct RestoreResult {
 
 struct CurrentFileState {
     hash_hex: String,
+}
+
+struct RestoreDiff {
+    files_to_add: Vec<String>,
+    files_to_change: Vec<String>,
+    files_to_remove: Vec<String>,
+    files_unchanged: u64,
 }
 
 /// Convert a [u8; 32] to a 64-char hex string.
@@ -183,6 +190,61 @@ fn restore_files(
     })
 }
 
+fn diff_restore_states(
+    target_state: &BTreeMap<String, String>,
+    current_state: &BTreeMap<String, CurrentFileState>,
+) -> RestoreDiff {
+    let mut files_to_add = Vec::new();
+    let mut files_to_change = Vec::new();
+    let mut files_to_remove = Vec::new();
+    let mut files_unchanged = 0;
+
+    let mut target_iter = target_state.iter().peekable();
+    let mut current_iter = current_state.iter().peekable();
+
+    loop {
+        match (target_iter.peek(), current_iter.peek()) {
+            (Some((target_path, target_hash)), Some((current_path, current_file))) => {
+                match target_path.cmp(current_path) {
+                    std::cmp::Ordering::Less => {
+                        files_to_add.push((*target_path).clone());
+                        target_iter.next();
+                    }
+                    std::cmp::Ordering::Greater => {
+                        files_to_remove.push((*current_path).clone());
+                        current_iter.next();
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if target_hash.as_str() != current_file.hash_hex {
+                            files_to_change.push((*target_path).clone());
+                        } else {
+                            files_unchanged += 1;
+                        }
+                        target_iter.next();
+                        current_iter.next();
+                    }
+                }
+            }
+            (Some((target_path, _)), None) => {
+                files_to_add.push((*target_path).clone());
+                target_iter.next();
+            }
+            (None, Some((current_path, _))) => {
+                files_to_remove.push((*current_path).clone());
+                current_iter.next();
+            }
+            (None, None) => break,
+        }
+    }
+
+    RestoreDiff {
+        files_to_add,
+        files_to_change,
+        files_to_remove,
+        files_unchanged,
+    }
+}
+
 /// Restore workspace to a snapshot state.
 ///
 /// This is the main restore function that:
@@ -258,28 +320,11 @@ pub fn restore(
     );
 
     // 6. Compare target state vs current state
-    let target_paths: BTreeSet<&String> = target_state.keys().collect();
-    let current_paths: BTreeSet<&String> = current_state.keys().collect();
-
-    // Files to add: in target but not in current workspace
-    let files_to_add: Vec<&String> = target_paths.difference(&current_paths).copied().collect();
-    // Files to remove: in current workspace but not in target
-    let files_to_remove: Vec<&String> = current_paths.difference(&target_paths).copied().collect();
-    // Files in both: check if content differs
-    let files_in_both: Vec<&String> = target_paths.intersection(&current_paths).copied().collect();
-
-    let mut files_to_change: Vec<&String> = Vec::new();
-    let mut files_unchanged: u64 = 0;
-
-    for path in &files_in_both {
-        let target_hash = &target_state[*path];
-        let current_hash = &current_state[*path].hash_hex;
-        if target_hash != current_hash {
-            files_to_change.push(path);
-        } else {
-            files_unchanged += 1;
-        }
-    }
+    let diff = diff_restore_states(&target_state, &current_state);
+    let files_to_add = diff.files_to_add;
+    let files_to_change = diff.files_to_change;
+    let files_to_remove = diff.files_to_remove;
+    let files_unchanged = diff.files_unchanged;
 
     let result = RestoreResult {
         snapshot_id: resolved_id.clone(),
@@ -314,7 +359,15 @@ pub fn restore(
     let restore_tasks: Vec<(String, String)> = files_to_add
         .iter()
         .chain(files_to_change.iter())
-        .map(|path| ((*path).clone(), target_state[*path].clone()))
+        .map(|path| {
+            (
+                path.clone(),
+                target_state
+                    .get(path)
+                    .expect("target hash missing for restore task")
+                    .clone(),
+            )
+        })
         .collect();
     let restore_progress = AtomicU64::new(0);
     let restored_paths = restore_files(
@@ -347,9 +400,8 @@ pub fn restore(
     // 8c. Clean up empty directories
     cleanup_empty_dirs(workspace_root)?;
 
-    let removed_paths: Vec<String> = files_to_remove.into_iter().cloned().collect();
     let file_entries = restored_index_entries(workspace_root, &restored_paths, &target_state)?;
-    index.apply_changes(&removed_paths, &file_entries)?;
+    index.apply_changes(&files_to_remove, &file_entries)?;
 
     Ok(result)
 }
@@ -565,5 +617,52 @@ mod tests {
         std::fs::create_dir_all(objects_dir.join("aa")).unwrap();
         std::fs::write(objects_dir.join("aa").join("bb"), b"data").unwrap();
         assert!(blob_store_has_loose_objects(&objects_dir).unwrap());
+    }
+
+    #[test]
+    fn test_diff_restore_states_classifies_paths() {
+        let target_state = BTreeMap::from([
+            ("a.txt".to_string(), "hash-a".to_string()),
+            ("b.txt".to_string(), "hash-b-target".to_string()),
+            ("c.txt".to_string(), "hash-c".to_string()),
+        ]);
+        let current_state = BTreeMap::from([
+            (
+                "b.txt".to_string(),
+                CurrentFileState {
+                    hash_hex: "hash-b-current".to_string(),
+                },
+            ),
+            (
+                "c.txt".to_string(),
+                CurrentFileState {
+                    hash_hex: "hash-c".to_string(),
+                },
+            ),
+            (
+                "d.txt".to_string(),
+                CurrentFileState {
+                    hash_hex: "hash-d".to_string(),
+                },
+            ),
+        ]);
+
+        let diff = diff_restore_states(&target_state, &current_state);
+        assert_eq!(diff.files_to_add, vec!["a.txt".to_string()]);
+        assert_eq!(diff.files_to_change, vec!["b.txt".to_string()]);
+        assert_eq!(diff.files_to_remove, vec!["d.txt".to_string()]);
+        assert_eq!(diff.files_unchanged, 1);
+    }
+
+    #[test]
+    fn test_diff_restore_states_handles_empty_inputs() {
+        let target_state: BTreeMap<String, String> = BTreeMap::new();
+        let current_state: BTreeMap<String, CurrentFileState> = BTreeMap::new();
+        let diff = diff_restore_states(&target_state, &current_state);
+
+        assert!(diff.files_to_add.is_empty());
+        assert!(diff.files_to_change.is_empty());
+        assert!(diff.files_to_remove.is_empty());
+        assert_eq!(diff.files_unchanged, 0);
     }
 }

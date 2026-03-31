@@ -185,3 +185,37 @@ Run 2:
 Decision:
 - Kept. Target metric `restore_apply` improved consistently in large-workload repeated runs (~6-7%).
 - Other save-related metrics fluctuate within expected filesystem/cache noise range.
+
+### Step 4 (Kept): One-pass restore state diff (remove BTreeSet diff allocations)
+
+Changes applied:
+- Replaced `target_paths/current_paths` `BTreeSet` construction + `difference/intersection` passes with a single ordered merge-diff over `BTreeMap` iterators.
+- Added `diff_restore_states(...)` helper and unit tests for add/change/remove/unchanged classification.
+
+Benchmark policy for this step:
+- Before baseline: current `HEAD` at step 3 (`75898c5`) in same workspace/session.
+- After: current workspace with step 4 changes.
+- Benchmarks executed sequentially (not parallel) to avoid cross-run contention.
+
+#### Scenario A (default bench_ops, iterations=5)
+
+| Metric | Before Avg (ms) | After Avg (ms) | Delta |
+|---|---:|---:|---:|
+| cold_save | 46.89 | 46.21 | -1.45% |
+| warm_save | 10.30 | 9.76 | -5.24% |
+| incremental_save | 14.78 | 14.50 | -1.89% |
+| restore_dry_run | 22.32 | 20.87 | -6.50% |
+| restore_apply | 40.65 | 37.20 | -8.49% |
+
+#### Scenario B (large, files=20000 modified_files=5000 dirs=400 iterations=3)
+
+| Metric | Before Avg (ms) | After Avg (ms) | Delta |
+|---|---:|---:|---:|
+| cold_save | 387.06 | 381.35 | -1.48% |
+| warm_save | 45.46 | 45.50 | +0.09% |
+| incremental_save | 107.82 | 107.14 | -0.63% |
+| restore_dry_run | 161.16 | 155.58 | -3.46% |
+| restore_apply | 489.49 | 479.13 | -2.12% |
+
+Decision:
+- Kept. This step improves the restore comparison phase consistently, with notable gains in both `restore_dry_run` and `restore_apply`.
