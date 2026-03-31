@@ -116,7 +116,8 @@ impl PackWriter {
         }
 
         // Sort idx entries by hash for binary search
-        self.idx_entries.sort_unstable_by(|a, b| a.hash.cmp(&b.hash));
+        self.idx_entries
+            .sort_unstable_by(|a, b| a.hash.cmp(&b.hash));
 
         // Write .idx file
         let idx_path = self.packs_dir.join(format!("pack-{}.idx", pack_hash));

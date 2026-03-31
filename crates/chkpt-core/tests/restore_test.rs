@@ -25,7 +25,10 @@ fn test_restore_dry_run() {
     let r = save(workspace.path(), SaveOptions::default()).unwrap();
 
     fs::write(workspace.path().join("a.txt"), "v2").unwrap();
-    let opts = RestoreOptions { dry_run: true };
+    let opts = RestoreOptions {
+        dry_run: true,
+        ..Default::default()
+    };
     let result = restore(workspace.path(), &r.snapshot_id, opts).unwrap();
 
     // Workspace should NOT be modified

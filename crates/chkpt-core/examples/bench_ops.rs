@@ -149,7 +149,10 @@ fn run_iteration(config: BenchConfig) -> Result<Metrics, Box<dyn std::error::Err
         restore(
             workspace.path(),
             &baseline_snapshot_id,
-            RestoreOptions { dry_run: true },
+            RestoreOptions {
+                dry_run: true,
+                ..Default::default()
+            },
         )
     })?;
 
@@ -157,7 +160,10 @@ fn run_iteration(config: BenchConfig) -> Result<Metrics, Box<dyn std::error::Err
         restore(
             workspace.path(),
             &baseline_snapshot_id,
-            RestoreOptions { dry_run: false },
+            RestoreOptions {
+                dry_run: false,
+                ..Default::default()
+            },
         )
     })?;
 

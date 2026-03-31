@@ -77,6 +77,7 @@ impl ChkpttServer {
         let options = chkpt_core::ops::save::SaveOptions {
             message: params.message,
             include_deps: params.include_deps.unwrap_or(false),
+            ..Default::default()
         };
         match chkpt_core::ops::save::save(workspace_path, options) {
             Ok(result) => serde_json::json!({
@@ -142,6 +143,7 @@ impl ChkpttServer {
         let workspace_path = Path::new(&params.workspace_path);
         let options = chkpt_core::ops::restore::RestoreOptions {
             dry_run: params.dry_run.unwrap_or(false),
+            ..Default::default()
         };
         match chkpt_core::ops::restore::restore(workspace_path, &params.snapshot_id, options) {
             Ok(result) => serde_json::json!({

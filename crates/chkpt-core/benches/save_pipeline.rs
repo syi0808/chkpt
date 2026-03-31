@@ -34,15 +34,12 @@ fn read_openat(scanned: &ScannedFile, dir_fds: &HashMap<String, std::os::fd::Own
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let filename = scanned
-        .absolute_path
-        .file_name()
-        .unwrap()
-        .to_string_lossy();
+    let filename = scanned.absolute_path.file_name().unwrap().to_string_lossy();
 
     let dir_fd = dir_fds.get(&parent).unwrap();
     let file_fd = openat(dir_fd.as_fd(), &*filename, OFlags::RDONLY, Mode::empty()).unwrap();
-    let mut file = unsafe { std::fs::File::from_raw_fd(rustix::fd::IntoRawFd::into_raw_fd(file_fd)) };
+    let mut file =
+        unsafe { std::fs::File::from_raw_fd(rustix::fd::IntoRawFd::into_raw_fd(file_fd)) };
     let mut buf = Vec::with_capacity(scanned.size as usize);
     file.read_to_end(&mut buf).unwrap();
     buf
@@ -80,7 +77,12 @@ where
     results.into_iter().flatten().collect()
 }
 
-fn bench_read_hash(label: &str, files: &[&ScannedFile], threads: usize, read_fn: impl Fn(&ScannedFile) -> Vec<u8> + Sync) -> u128 {
+fn bench_read_hash(
+    label: &str,
+    files: &[&ScannedFile],
+    threads: usize,
+    read_fn: impl Fn(&ScannedFile) -> Vec<u8> + Sync,
+) -> u128 {
     let t = Instant::now();
     let _results: Vec<[u8; 32]> = parallel_map(files, threads, |s| {
         let content = read_fn(s);
@@ -99,13 +101,24 @@ fn build_dir_fd_cache(files: &[&ScannedFile]) -> HashMap<String, std::os::fd::Ow
 
     let mut dirs: HashSet<String> = HashSet::new();
     for f in files {
-        let parent = f.absolute_path.parent().unwrap().to_string_lossy().into_owned();
+        let parent = f
+            .absolute_path
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         dirs.insert(parent);
     }
 
     let mut cache = HashMap::with_capacity(dirs.len());
     for dir in dirs {
-        let fd = openat(CWD, &*dir, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty()).unwrap();
+        let fd = openat(
+            CWD,
+            &*dir,
+            OFlags::RDONLY | OFlags::DIRECTORY,
+            Mode::empty(),
+        )
+        .unwrap();
         cache.insert(dir, fd);
     }
     cache
@@ -189,7 +202,10 @@ fn main() {
 
     // ── Phase 3: read+hash optimization comparison ──
     println!();
-    println!("--- read+hash variants ({} files) ---", files_to_prepare.len());
+    println!(
+        "--- read+hash variants ({} files) ---",
+        files_to_prepare.len()
+    );
 
     // 3a: Baseline (current code)
     let baseline_ms = bench_read_hash(
@@ -202,12 +218,7 @@ fn main() {
     // 3b: Inode-sorted
     let mut inode_sorted = files_to_prepare.clone();
     inode_sorted.sort_unstable_by_key(|f| f.inode.unwrap_or(u64::MAX));
-    let inode_ms = bench_read_hash(
-        "inode-sorted",
-        &inode_sorted,
-        default_threads,
-        read_std,
-    );
+    let inode_ms = bench_read_hash("inode-sorted", &inode_sorted, default_threads, read_std);
 
     // 3c: Thread count sweep (with inode sort)
     println!();
@@ -219,12 +230,7 @@ fn main() {
         if tc > default_threads * 2 {
             continue;
         }
-        let ms = bench_read_hash(
-            &format!("{} threads", tc),
-            &inode_sorted,
-            tc,
-            read_std,
-        );
+        let ms = bench_read_hash(&format!("{} threads", tc), &inode_sorted, tc, read_std);
         if ms < best_thread_ms {
             best_thread_ms = ms;
             best_threads = tc;
@@ -240,16 +246,17 @@ fn main() {
         let t = Instant::now();
         let dir_fds = build_dir_fd_cache(&inode_sorted);
         let cache_build_ms = t.elapsed().as_millis();
-        println!("  dir FD cache build: {}ms ({} dirs)", cache_build_ms, dir_fds.len());
+        println!(
+            "  dir FD cache build: {}ms ({} dirs)",
+            cache_build_ms,
+            dir_fds.len()
+        );
 
         let dir_fds = Arc::new(dir_fds);
         let dir_fds_ref = &dir_fds;
-        let ms = bench_read_hash(
-            "openat + inode-sorted",
-            &inode_sorted,
-            best_threads,
-            |s| read_openat(s, dir_fds_ref),
-        );
+        let ms = bench_read_hash("openat + inode-sorted", &inode_sorted, best_threads, |s| {
+            read_openat(s, dir_fds_ref)
+        });
         ms + cache_build_ms
     };
 
@@ -267,25 +274,23 @@ fn main() {
     #[cfg(unix)]
     let combined_ms = {
         println!();
-        println!("--- combined: openat + mmap + inode + {} threads ---", best_threads);
+        println!(
+            "--- combined: openat + mmap + inode + {} threads ---",
+            best_threads
+        );
         let dir_fds = Arc::new(build_dir_fd_cache(&inode_sorted));
         let dir_fds_ref = &dir_fds;
-        bench_read_hash(
-            "ALL COMBINED",
-            &inode_sorted,
-            best_threads,
-            |s| {
-                if s.size >= 65536 {
-                    // mmap for large files
-                    let file = std::fs::File::open(&s.absolute_path).unwrap();
-                    let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
-                    mmap.to_vec()
-                } else {
-                    // openat for small files
-                    read_openat(s, dir_fds_ref)
-                }
-            },
-        )
+        bench_read_hash("ALL COMBINED", &inode_sorted, best_threads, |s| {
+            if s.size >= 65536 {
+                // mmap for large files
+                let file = std::fs::File::open(&s.absolute_path).unwrap();
+                let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
+                mmap.to_vec()
+            } else {
+                // openat for small files
+                read_openat(s, dir_fds_ref)
+            }
+        })
     };
 
     // ── Phase 4: compress + pack (using best config) ──
@@ -383,8 +388,16 @@ fn main() {
 
     let mut dir_list: Vec<String> = all_dirs.into_iter().collect();
     dir_list.sort_unstable_by(|a, b| {
-        let da = if a.is_empty() { 0 } else { a.matches('/').count() + 1 };
-        let db = if b.is_empty() { 0 } else { b.matches('/').count() + 1 };
+        let da = if a.is_empty() {
+            0
+        } else {
+            a.matches('/').count() + 1
+        };
+        let db = if b.is_empty() {
+            0
+        } else {
+            b.matches('/').count() + 1
+        };
         db.cmp(&da).then_with(|| a.cmp(b))
     });
 
@@ -420,8 +433,7 @@ fn main() {
                 };
                 let mut hash_bytes = [0u8; 32];
                 for i in 0..32 {
-                    hash_bytes[i] =
-                        u8::from_str_radix(&sub_hash[i * 2..i * 2 + 2], 16).unwrap();
+                    hash_bytes[i] = u8::from_str_radix(&sub_hash[i * 2..i * 2 + 2], 16).unwrap();
                 }
                 entries.push(TreeEntry {
                     name: sub_name,
@@ -477,14 +489,38 @@ fn main() {
     println!("╔══════════════════════════════════════════════════╗");
     println!("║  read+hash comparison summary                   ║");
     println!("╠══════════════════════════════════════════════════╣");
-    println!("║  baseline (path order, {} threads) {:>6}ms     ║", default_threads, baseline_ms);
-    println!("║  + inode sort                      {:>6}ms {:>+4.0}% ║", inode_ms, pct(inode_ms, baseline_ms));
-    println!("║  + best threads ({:>2})              {:>6}ms {:>+4.0}% ║", best_threads, best_thread_ms, pct(best_thread_ms, baseline_ms));
+    println!(
+        "║  baseline (path order, {} threads) {:>6}ms     ║",
+        default_threads, baseline_ms
+    );
+    println!(
+        "║  + inode sort                      {:>6}ms {:>+4.0}% ║",
+        inode_ms,
+        pct(inode_ms, baseline_ms)
+    );
+    println!(
+        "║  + best threads ({:>2})              {:>6}ms {:>+4.0}% ║",
+        best_threads,
+        best_thread_ms,
+        pct(best_thread_ms, baseline_ms)
+    );
     #[cfg(unix)]
-    println!("║  + openat                         {:>6}ms {:>+4.0}% ║", openat_ms, pct(openat_ms, baseline_ms));
-    println!("║  + mmap hybrid                    {:>6}ms {:>+4.0}% ║", mmap_ms, pct(mmap_ms, baseline_ms));
+    println!(
+        "║  + openat                         {:>6}ms {:>+4.0}% ║",
+        openat_ms,
+        pct(openat_ms, baseline_ms)
+    );
+    println!(
+        "║  + mmap hybrid                    {:>6}ms {:>+4.0}% ║",
+        mmap_ms,
+        pct(mmap_ms, baseline_ms)
+    );
     #[cfg(unix)]
-    println!("║  ALL COMBINED                     {:>6}ms {:>+4.0}% ║", combined_ms, pct(combined_ms, baseline_ms));
+    println!(
+        "║  ALL COMBINED                     {:>6}ms {:>+4.0}% ║",
+        combined_ms,
+        pct(combined_ms, baseline_ms)
+    );
     println!("╚══════════════════════════════════════════════════╝");
 }
 

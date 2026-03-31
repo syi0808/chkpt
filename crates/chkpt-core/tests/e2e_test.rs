@@ -143,7 +143,10 @@ fn test_e2e_dry_run_no_modification() {
     let result = restore(
         workspace.path(),
         &r.snapshot_id,
-        RestoreOptions { dry_run: true },
+        RestoreOptions {
+            dry_run: true,
+            ..Default::default()
+        },
     )
     .unwrap();
 

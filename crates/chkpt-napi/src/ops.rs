@@ -26,6 +26,7 @@ pub async fn save(
     let options = SaveOptions {
         message,
         include_deps: include_deps.unwrap_or(false),
+        ..Default::default()
     };
     let result = save::save(&root, options).map_err(to_napi_error)?;
     Ok(JsSaveResult {
@@ -112,6 +113,7 @@ pub async fn restore(
     let root = PathBuf::from(workspace_path);
     let options = RestoreOptions {
         dry_run: dry_run.unwrap_or(false),
+        ..Default::default()
     };
     let result = restore::restore(&root, &snapshot_id, options).map_err(to_napi_error)?;
     Ok(JsRestoreResult {

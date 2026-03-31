@@ -9,12 +9,16 @@ use crate::store::snapshot::{Snapshot, SnapshotAttachments, SnapshotStats, Snaps
 use crate::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Default)]
+use crate::ops::progress::{emit, ProgressCallback, ProgressEvent};
+
+#[derive(Default)]
 pub struct SaveOptions {
     pub message: Option<String>,
     pub include_deps: bool,
+    pub progress: ProgressCallback,
 }
 
 #[derive(Debug)]
@@ -78,6 +82,12 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     // 4. Scan workspace (respect .chkptignore)
     let scanned_files =
         crate::scanner::scan_workspace_with_options(workspace_root, None, options.include_deps)?;
+    emit(
+        &options.progress,
+        ProgressEvent::ScanComplete {
+            file_count: scanned_files.len() as u64,
+        },
+    );
 
     // 5. Open/create FileIndex
     let mut index = FileIndex::open(layout.index_path())?;
@@ -133,7 +143,21 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     let seen_hashes = Arc::new(Mutex::new(staged_pack_hashes));
 
     // Batch parallel: each thread processes a chunk independently, no channel overhead
-    let prepared_results = prepare_files_batch(&files_to_prepare, &seen_hashes)?;
+    let total_to_process = files_to_prepare.len() as u64;
+    emit(
+        &options.progress,
+        ProgressEvent::ProcessStart {
+            total: total_to_process,
+        },
+    );
+    let progress_counter = AtomicU64::new(0);
+    let prepared_results = prepare_files_batch(
+        &files_to_prepare,
+        &seen_hashes,
+        &options.progress,
+        &progress_counter,
+        total_to_process,
+    )?;
 
     for prepared in prepared_results {
         let PreparedFile {
@@ -179,26 +203,26 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     if !pack_writer.is_empty() {
         pack_writer.finish()?;
     }
+    emit(&options.progress, ProgressEvent::PackComplete);
 
     // 8. Build tree bottom-up (skip if nothing changed)
     let snapshot_store = SnapshotStore::new(layout.snapshots_dir());
     let latest_snapshot = snapshot_store.latest()?;
 
-    let (root_tree_hash, _root_tree_hash_hex) =
-        if new_objects == 0 && removed_paths.is_empty() {
-            if let Some(ref snap) = latest_snapshot {
-                // Nothing changed — reuse previous tree hash (skip build entirely)
-                (snap.root_tree_hash, String::new())
-            } else {
-                let tree_store = TreeStore::new(layout.trees_dir());
-                let hex = build_tree(&processed_files, &tree_store)?;
-                (hex_to_bytes(&hex)?, hex)
-            }
+    let (root_tree_hash, _root_tree_hash_hex) = if new_objects == 0 && removed_paths.is_empty() {
+        if let Some(ref snap) = latest_snapshot {
+            // Nothing changed — reuse previous tree hash (skip build entirely)
+            (snap.root_tree_hash, String::new())
         } else {
             let tree_store = TreeStore::new(layout.trees_dir());
             let hex = build_tree(&processed_files, &tree_store)?;
             (hex_to_bytes(&hex)?, hex)
-        };
+        }
+    } else {
+        let tree_store = TreeStore::new(layout.trees_dir());
+        let hex = build_tree(&processed_files, &tree_store)?;
+        (hex_to_bytes(&hex)?, hex)
+    };
 
     // 9. Find latest snapshot for parent_snapshot_id (already fetched above)
     let parent_snapshot_id = latest_snapshot.map(|s| s.id);
@@ -353,6 +377,9 @@ fn prepare_file(
 fn prepare_files_batch(
     scanned_files: &[&ScannedFile],
     seen_hashes: &Arc<Mutex<HashSet<[u8; 32]>>>,
+    progress: &ProgressCallback,
+    progress_counter: &AtomicU64,
+    total_to_process: u64,
 ) -> Result<Vec<PreparedFile>> {
     if scanned_files.is_empty() {
         return Ok(Vec::new());
@@ -366,7 +393,18 @@ fn prepare_files_batch(
     if worker_count <= 1 {
         return scanned_files
             .iter()
-            .map(|s| prepare_file(s, seen_hashes))
+            .map(|s| {
+                let result = prepare_file(s, seen_hashes);
+                let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                emit(
+                    progress,
+                    ProgressEvent::ProcessFile {
+                        completed,
+                        total: total_to_process,
+                    },
+                );
+                result
+            })
             .collect();
     }
 
@@ -379,16 +417,24 @@ fn prepare_files_batch(
                 scope.spawn(|| {
                     chunk
                         .iter()
-                        .map(|scanned| prepare_file(scanned, seen_hashes))
+                        .map(|scanned| {
+                            let result = prepare_file(scanned, seen_hashes);
+                            let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                            emit(
+                                progress,
+                                ProgressEvent::ProcessFile {
+                                    completed,
+                                    total: total_to_process,
+                                },
+                            );
+                            result
+                        })
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
 
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect()
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     // Flatten and propagate errors
@@ -425,8 +471,16 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
     // Sort directories bottom-up (deepest first)
     let mut dir_list: Vec<String> = all_dirs.into_iter().collect();
     dir_list.sort_unstable_by(|a, b| {
-        let depth_a = if a.is_empty() { 0 } else { a.matches('/').count() + 1 };
-        let depth_b = if b.is_empty() { 0 } else { b.matches('/').count() + 1 };
+        let depth_a = if a.is_empty() {
+            0
+        } else {
+            a.matches('/').count() + 1
+        };
+        let depth_b = if b.is_empty() {
+            0
+        } else {
+            b.matches('/').count() + 1
+        };
         depth_b.cmp(&depth_a).then_with(|| a.cmp(b))
     });
 

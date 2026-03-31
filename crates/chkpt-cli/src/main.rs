@@ -1,6 +1,11 @@
 use anyhow::{bail, Result};
+use chkpt_core::ops::progress::{ProgressCallback, ProgressEvent};
 use clap::{Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Select};
+use indicatif::{ProgressBar, ProgressStyle};
+use std::io::IsTerminal;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "chkpt", about = "Filesystem checkpoint engine")]
@@ -25,6 +30,9 @@ enum Commands {
         /// Maximum number of checkpoints to show
         #[arg(short = 'n', long)]
         limit: Option<usize>,
+        /// Show full snapshot IDs
+        #[arg(long)]
+        full: bool,
     },
     /// Restore workspace to a checkpoint
     Restore {
@@ -41,6 +49,90 @@ enum Commands {
     },
 }
 
+fn new_spinner(msg: &str) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap(),
+    );
+    pb.set_message(msg.to_string());
+    pb.enable_steady_tick(Duration::from_millis(80));
+    pb
+}
+
+fn new_bar(total: u64, msg: &str) -> ProgressBar {
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{msg} [{bar:30.cyan/dim}] {pos}/{len}")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+    pb.set_message(msg.to_string());
+    pb
+}
+
+fn save_progress() -> ProgressCallback {
+    if !std::io::stderr().is_terminal() {
+        return None;
+    }
+    let bar: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
+    let bar_ref = bar.clone();
+    Some(Box::new(move |event| match event {
+        ProgressEvent::ScanComplete { file_count } => {
+            let spinner = new_spinner(&format!("Scanned {} files", file_count));
+            spinner.finish_and_clear();
+        }
+        ProgressEvent::ProcessStart { total } => {
+            if total > 0 {
+                *bar_ref.lock().unwrap() = Some(new_bar(total, "Processing"));
+            }
+        }
+        ProgressEvent::ProcessFile { completed, .. } => {
+            if let Some(pb) = bar_ref.lock().unwrap().as_ref() {
+                pb.set_position(completed);
+            }
+        }
+        ProgressEvent::PackComplete => {
+            if let Some(pb) = bar_ref.lock().unwrap().take() {
+                pb.finish_and_clear();
+            }
+        }
+        _ => {}
+    }))
+}
+
+fn restore_progress() -> ProgressCallback {
+    if !std::io::stderr().is_terminal() {
+        return None;
+    }
+    let bar: Arc<Mutex<Option<ProgressBar>>> = Arc::new(Mutex::new(None));
+    let bar_ref = bar.clone();
+    Some(Box::new(move |event| match event {
+        ProgressEvent::ScanCurrentComplete { file_count } => {
+            let spinner = new_spinner(&format!("Scanned {} files", file_count));
+            spinner.finish_and_clear();
+        }
+        ProgressEvent::RestoreStart {
+            add,
+            change,
+            remove,
+        } => {
+            let total = add + change + remove;
+            if total > 0 {
+                *bar_ref.lock().unwrap() = Some(new_bar(total, "Restoring"));
+            }
+        }
+        ProgressEvent::RestoreFile { completed, .. } => {
+            if let Some(pb) = bar_ref.lock().unwrap().as_ref() {
+                pb.set_position(completed);
+            }
+        }
+        _ => {}
+    }))
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
@@ -54,6 +146,7 @@ fn main() -> Result<()> {
             let opts = chkpt_core::ops::save::SaveOptions {
                 message,
                 include_deps,
+                progress: save_progress(),
             };
             let result = chkpt_core::ops::save::save(&workspace, opts)?;
             println!("Checkpoint saved: {}", result.snapshot_id);
@@ -62,25 +155,34 @@ fn main() -> Result<()> {
                 result.stats.total_files, result.stats.new_objects, result.stats.total_bytes
             );
         }
-        Commands::List { limit } => {
+        Commands::List { limit, full } => {
             let snapshots = chkpt_core::ops::list::list(&workspace, limit)?;
             if snapshots.is_empty() {
                 println!("No checkpoints found.");
             } else {
+                let id_width = if full { 38 } else { 10 };
                 println!(
-                    "{:<10} {:<22} {:<8} {}",
-                    "ID", "Created", "Files", "Message"
+                    "{:<w$} {:<22} {:<8} Message",
+                    "ID",
+                    "Created",
+                    "Files",
+                    w = id_width
                 );
-                println!("{}", "-".repeat(60));
+                println!("{}", "-".repeat(if full { 86 } else { 60 }));
                 for snap in &snapshots {
-                    let short_id = &snap.id[..8.min(snap.id.len())];
+                    let display_id = if full {
+                        snap.id.as_str()
+                    } else {
+                        &snap.id[..8.min(snap.id.len())]
+                    };
                     let msg = snap.message.as_deref().unwrap_or("");
                     println!(
-                        "{:<10} {:<22} {:<8} {}",
-                        short_id,
+                        "{:<w$} {:<22} {:<8} {}",
+                        display_id,
                         snap.created_at.format("%Y-%m-%d %H:%M:%S"),
                         snap.stats.total_files,
-                        msg
+                        msg,
+                        w = id_width
                     );
                 }
                 println!("\n{} checkpoint(s)", snapshots.len());
@@ -124,7 +226,10 @@ fn main() -> Result<()> {
                 }
             };
 
-            let opts = chkpt_core::ops::restore::RestoreOptions { dry_run };
+            let opts = chkpt_core::ops::restore::RestoreOptions {
+                dry_run,
+                progress: if dry_run { None } else { restore_progress() },
+            };
             let result = chkpt_core::ops::restore::restore(&workspace, &snapshot_id, opts)?;
             if dry_run {
                 println!("Dry run -- no changes made:");

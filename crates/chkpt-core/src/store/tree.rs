@@ -49,23 +49,20 @@ impl TreeStore {
         let dat_path = base_dir.join("trees.dat");
         let idx_path = base_dir.join("trees.idx");
 
-        let (pack_dat, pack_idx, pack_entry_count) =
-            if dat_path.exists() && idx_path.exists() {
-                match (
-                    std::fs::File::open(&dat_path)
-                        .and_then(|f| unsafe { Mmap::map(&f) }),
-                    std::fs::File::open(&idx_path)
-                        .and_then(|f| unsafe { Mmap::map(&f) }),
-                ) {
-                    (Ok(dat), Ok(idx)) => {
-                        let count = idx.len() / TREE_IDX_ENTRY_SIZE;
-                        (Some(dat), Some(idx), count)
-                    }
-                    _ => (None, None, 0),
+        let (pack_dat, pack_idx, pack_entry_count) = if dat_path.exists() && idx_path.exists() {
+            match (
+                std::fs::File::open(&dat_path).and_then(|f| unsafe { Mmap::map(&f) }),
+                std::fs::File::open(&idx_path).and_then(|f| unsafe { Mmap::map(&f) }),
+            ) {
+                (Ok(dat), Ok(idx)) => {
+                    let count = idx.len() / TREE_IDX_ENTRY_SIZE;
+                    (Some(dat), Some(idx), count)
                 }
-            } else {
-                (None, None, 0)
-            };
+                _ => (None, None, 0),
+            }
+        } else {
+            (None, None, 0)
+        };
 
         Self {
             base_dir,
@@ -106,10 +103,7 @@ impl TreeStore {
 
     /// Write a batch of pre-computed trees to a pack file.
     /// Each entry is (hash_hex, encoded_data).
-    pub fn write_pack(
-        &self,
-        entries: &[(String, Vec<u8>)],
-    ) -> Result<()> {
+    pub fn write_pack(&self, entries: &[(String, Vec<u8>)]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -129,10 +123,8 @@ impl TreeStore {
                 let pos = i * TREE_IDX_ENTRY_SIZE;
                 let mut hash = [0u8; 32];
                 hash.copy_from_slice(&idx[pos..pos + 32]);
-                let offset =
-                    u64::from_le_bytes(idx[pos + 32..pos + 40].try_into().unwrap());
-                let size =
-                    u64::from_le_bytes(idx[pos + 40..pos + 48].try_into().unwrap());
+                let offset = u64::from_le_bytes(idx[pos + 32..pos + 40].try_into().unwrap());
+                let size = u64::from_le_bytes(idx[pos + 40..pos + 48].try_into().unwrap());
                 existing_hashes.insert(hash);
                 all_idx_entries.push(TreeIdxEntry { hash, offset, size });
             }
@@ -191,8 +183,7 @@ impl TreeStore {
 
         // Sort idx and write
         all_idx_entries.sort_unstable_by(|a, b| a.hash.cmp(&b.hash));
-        let mut idx_buf: Vec<u8> =
-            Vec::with_capacity(all_idx_entries.len() * TREE_IDX_ENTRY_SIZE);
+        let mut idx_buf: Vec<u8> = Vec::with_capacity(all_idx_entries.len() * TREE_IDX_ENTRY_SIZE);
         for entry in &all_idx_entries {
             idx_buf.extend_from_slice(&entry.hash);
             idx_buf.extend_from_slice(&entry.offset.to_le_bytes());
@@ -238,10 +229,8 @@ impl TreeStore {
             let mid_hash = &idx[pos..pos + 32];
             match mid_hash.cmp(&hash_bytes) {
                 std::cmp::Ordering::Equal => {
-                    let offset =
-                        u64::from_le_bytes(idx[pos + 32..pos + 40].try_into().unwrap());
-                    let size =
-                        u64::from_le_bytes(idx[pos + 40..pos + 48].try_into().unwrap());
+                    let offset = u64::from_le_bytes(idx[pos + 32..pos + 40].try_into().unwrap());
+                    let size = u64::from_le_bytes(idx[pos + 40..pos + 48].try_into().unwrap());
                     let data_start = offset as usize + 32 + 8;
                     let data_end = data_start + size as usize;
                     if data_end > dat.len() {

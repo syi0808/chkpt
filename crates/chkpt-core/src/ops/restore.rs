@@ -10,9 +10,12 @@ use crate::store::tree::{EntryType, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
-#[derive(Debug, Default)]
+use crate::ops::progress::{emit, ProgressCallback, ProgressEvent};
+
+#[derive(Default)]
 pub struct RestoreOptions {
     pub dry_run: bool,
+    pub progress: ProgressCallback,
 }
 
 #[derive(Debug)]
@@ -157,6 +160,12 @@ pub fn restore(
     let mut index = FileIndex::open(layout.index_path())?;
     let cached_entries = index.entries_by_path()?;
     let current_state = scan_current_state(workspace_root, &cached_entries)?;
+    emit(
+        &options.progress,
+        ProgressEvent::ScanCurrentComplete {
+            file_count: current_state.len() as u64,
+        },
+    );
 
     // 6. Compare target state vs current state
     let target_paths: BTreeSet<&String> = target_state.keys().collect();
@@ -200,7 +209,18 @@ pub fn restore(
     let packs_dir = layout.packs_dir();
     let pack_set = PackSet::open_all(&packs_dir)?;
 
+    let restore_total = (files_to_add.len() + files_to_change.len() + files_to_remove.len()) as u64;
+    emit(
+        &options.progress,
+        ProgressEvent::RestoreStart {
+            add: files_to_add.len() as u64,
+            change: files_to_change.len() as u64,
+            remove: files_to_remove.len() as u64,
+        },
+    );
+
     // 8a. Restore files that need to be added or changed
+    let mut restore_completed: u64 = 0;
     for path in files_to_add.iter().chain(files_to_change.iter()) {
         let blob_hash_hex = &target_state[*path];
         let content = if blob_store.exists(blob_hash_hex) {
@@ -216,6 +236,14 @@ pub fn restore(
         }
 
         std::fs::write(&file_path, &content)?;
+        restore_completed += 1;
+        emit(
+            &options.progress,
+            ProgressEvent::RestoreFile {
+                completed: restore_completed,
+                total: restore_total,
+            },
+        );
     }
 
     // 8b. Remove files that are not in the target snapshot
@@ -224,6 +252,14 @@ pub fn restore(
         if file_path.exists() {
             std::fs::remove_file(&file_path)?;
         }
+        restore_completed += 1;
+        emit(
+            &options.progress,
+            ProgressEvent::RestoreFile {
+                completed: restore_completed,
+                total: restore_total,
+            },
+        );
     }
 
     // 8c. Clean up empty directories
