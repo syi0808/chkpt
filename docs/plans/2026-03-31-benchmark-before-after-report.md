@@ -138,3 +138,50 @@ Changes applied:
 Decision:
 - Kept. The primary target metric (`restore_apply`) improved significantly on large workload.
 - Small-workload save metrics regressed slightly; monitor in follow-up tuning.
+
+### Step 3 (Kept): Skip per-file loose-object lookup when store has no loose objects
+
+Changes applied:
+- Added `blob_store_has_loose_objects(objects_dir)` in restore path.
+- In `restore_files`, guard `blob_store.exists(hash)` behind one-time `has_loose_objects` check to avoid redundant filesystem metadata lookups when objects are fully packed.
+
+Benchmark policy for this step:
+- Before baseline: detached worktree at commit `e5c8c5c` (`/tmp/chkpt-bench-baseline`).
+- After: current workspace change set.
+- Commands executed in same session and host conditions.
+
+#### Scenario A (default bench_ops, iterations=5)
+
+| Metric | Before Avg (ms) | After Avg (ms) | Delta |
+|---|---:|---:|---:|
+| cold_save | 42.99 | 43.04 | +0.12% |
+| warm_save | 10.64 | 9.78 | -8.08% |
+| incremental_save | 14.40 | 14.73 | +2.29% |
+| restore_dry_run | 22.23 | 22.02 | -0.94% |
+| restore_apply | 38.03 | 37.97 | -0.16% |
+
+#### Scenario B (large, files=20000 modified_files=5000 dirs=400 iterations=3)
+
+Run 1:
+
+| Metric | Before Avg (ms) | After Avg (ms) | Delta |
+|---|---:|---:|---:|
+| cold_save | 421.91 | 380.67 | -9.77% |
+| warm_save | 44.45 | 45.64 | +2.68% |
+| incremental_save | 109.76 | 108.36 | -1.28% |
+| restore_dry_run | 157.24 | 157.12 | -0.08% |
+| restore_apply | 490.03 | 460.61 | -6.00% |
+
+Run 2:
+
+| Metric | Before Avg (ms) | After Avg (ms) | Delta |
+|---|---:|---:|---:|
+| cold_save | 376.81 | 390.09 | +3.52% |
+| warm_save | 46.60 | 44.99 | -3.45% |
+| incremental_save | 108.71 | 108.55 | -0.15% |
+| restore_dry_run | 159.35 | 156.19 | -1.98% |
+| restore_apply | 519.86 | 483.68 | -6.96% |
+
+Decision:
+- Kept. Target metric `restore_apply` improved consistently in large-workload repeated runs (~6-7%).
+- Other save-related metrics fluctuate within expected filesystem/cache noise range.

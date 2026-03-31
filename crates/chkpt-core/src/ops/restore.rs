@@ -99,6 +99,7 @@ fn restore_files(
     workspace_root: &Path,
     restore_tasks: &[(String, String)],
     blob_store: &BlobStore,
+    has_loose_objects: bool,
     pack_set: &PackSet,
     progress: &ProgressCallback,
     progress_counter: &AtomicU64,
@@ -115,7 +116,7 @@ fn restore_files(
     if worker_count <= 1 {
         let mut restored = Vec::with_capacity(restore_tasks.len());
         for (path, blob_hash_hex) in restore_tasks {
-            let content = if blob_store.exists(blob_hash_hex) {
+            let content = if has_loose_objects && blob_store.exists(blob_hash_hex) {
                 blob_store.read(blob_hash_hex)?
             } else {
                 read_object_from_pack_set(pack_set, blob_hash_hex)?
@@ -146,7 +147,7 @@ fn restore_files(
                 scope.spawn(move || -> Result<Vec<String>> {
                     let mut restored = Vec::with_capacity(chunk.len());
                     for (path, blob_hash_hex) in chunk {
-                        let content = if blob_store.exists(blob_hash_hex) {
+                        let content = if has_loose_objects && blob_store.exists(blob_hash_hex) {
                             blob_store.read(blob_hash_hex)?
                         } else {
                             read_object_from_pack_set(pack_set, blob_hash_hex)?
@@ -295,6 +296,7 @@ pub fn restore(
 
     // 8. Perform actual restore
     let blob_store = BlobStore::new(layout.objects_dir());
+    let has_loose_objects = blob_store_has_loose_objects(&layout.objects_dir())?;
     let packs_dir = layout.packs_dir();
     let pack_set = PackSet::open_all(&packs_dir)?;
 
@@ -319,6 +321,7 @@ pub fn restore(
         workspace_root,
         &restore_tasks,
         &blob_store,
+        has_loose_objects,
         &pack_set,
         &options.progress,
         &restore_progress,
@@ -496,6 +499,27 @@ fn cleanup_empty_dirs(root: &Path) -> Result<()> {
     cleanup_empty_dirs_recursive(root, root)
 }
 
+fn blob_store_has_loose_objects(objects_dir: &Path) -> Result<bool> {
+    if !objects_dir.exists() {
+        return Ok(false);
+    }
+    for prefix_entry in std::fs::read_dir(objects_dir)? {
+        let prefix_entry = prefix_entry?;
+        if !prefix_entry.file_type()?.is_dir() {
+            continue;
+        }
+        for object_entry in std::fs::read_dir(prefix_entry.path())? {
+            let object_entry = object_entry?;
+            if object_entry.file_type()?.is_file()
+                && !object_entry.file_name().to_string_lossy().ends_with(".tmp")
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn cleanup_empty_dirs_recursive(root: &Path, dir: &Path) -> Result<()> {
     if !dir.is_dir() {
         return Ok(());
@@ -519,4 +543,27 @@ fn cleanup_empty_dirs_recursive(root: &Path, dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_blob_store_has_loose_objects_false_for_empty_store() {
+        let dir = TempDir::new().unwrap();
+        let objects_dir = dir.path().join("objects");
+        std::fs::create_dir_all(&objects_dir).unwrap();
+        assert!(!blob_store_has_loose_objects(&objects_dir).unwrap());
+    }
+
+    #[test]
+    fn test_blob_store_has_loose_objects_true_when_file_exists() {
+        let dir = TempDir::new().unwrap();
+        let objects_dir = dir.path().join("objects");
+        std::fs::create_dir_all(objects_dir.join("aa")).unwrap();
+        std::fs::write(objects_dir.join("aa").join("bb"), b"data").unwrap();
+        assert!(blob_store_has_loose_objects(&objects_dir).unwrap());
+    }
 }
