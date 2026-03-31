@@ -10,6 +10,7 @@ use crate::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
+use std::sync::mpsc;
 
 #[derive(Debug, Default)]
 pub struct SaveOptions {
@@ -127,7 +128,17 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         .unwrap_or_default();
 
     let mut new_objects: u64 = 0;
-    for prepared in prepare_files(files_to_prepare)? {
+
+    // Pipeline: worker threads compress files and send through a bounded channel,
+    // main thread receives and writes to pack immediately. This overlaps compression
+    // with disk I/O and limits peak memory to channel_bound * avg_compressed_size.
+    let channel_bound = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        * 2;
+
+    for prepared in prepare_files_pipeline(files_to_prepare, channel_bound)? {
+        let prepared = prepared?;
         let PreparedFile {
             relative_path,
             blob_hash_hex,
@@ -313,37 +324,57 @@ fn prepare_file(scanned: &ScannedFile) -> Result<PreparedFile> {
     })
 }
 
-fn prepare_files(scanned_files: Vec<&ScannedFile>) -> Result<Vec<PreparedFile>> {
+/// Prepare files using a producer-consumer pipeline.
+///
+/// Worker threads compress files and send results through a bounded channel.
+/// The caller iterates over the receiver, consuming results as they arrive.
+/// This overlaps compression (CPU) with pack writing (I/O).
+fn prepare_files_pipeline(
+    scanned_files: Vec<&ScannedFile>,
+    channel_bound: usize,
+) -> Result<mpsc::IntoIter<Result<PreparedFile>>> {
     if scanned_files.is_empty() {
-        return Ok(Vec::new());
+        let (tx, rx) = mpsc::sync_channel(0);
+        drop(tx);
+        return Ok(rx.into_iter());
     }
 
-    let worker_count = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(1)
-        .min(scanned_files.len());
-    if worker_count <= 1 {
-        return scanned_files.into_iter().map(prepare_file).collect();
-    }
+    let (tx, rx) = mpsc::sync_channel::<Result<PreparedFile>>(channel_bound);
 
-    let chunk_size = scanned_files.len().div_ceil(worker_count);
-    std::thread::scope(|scope| {
-        let mut workers = Vec::new();
-        for chunk in scanned_files.chunks(chunk_size) {
-            workers.push(scope.spawn(move || -> Result<Vec<PreparedFile>> {
-                chunk.iter().map(|scanned| prepare_file(scanned)).collect()
-            }));
+    // Owned copies for the spawned thread (can't send references across spawn boundary)
+    let owned_files: Vec<ScannedFile> = scanned_files.into_iter().cloned().collect();
+
+    std::thread::spawn(move || {
+        let worker_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(owned_files.len());
+
+        if worker_count <= 1 {
+            for scanned in &owned_files {
+                if tx.send(prepare_file(scanned)).is_err() {
+                    return;
+                }
+            }
+            return;
         }
 
-        let mut prepared = Vec::new();
-        for worker in workers {
-            let chunk = worker
-                .join()
-                .map_err(|_| ChkpttError::Other("save worker thread panicked".into()))??;
-            prepared.extend(chunk);
-        }
-        Ok(prepared)
-    })
+        let chunk_size = owned_files.len().div_ceil(worker_count);
+        std::thread::scope(|scope| {
+            for chunk in owned_files.chunks(chunk_size) {
+                let tx = tx.clone();
+                scope.spawn(move || {
+                    for scanned in chunk {
+                        if tx.send(prepare_file(scanned)).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+    });
+
+    Ok(rx.into_iter())
 }
 
 /// Build tree structure bottom-up from processed files.
