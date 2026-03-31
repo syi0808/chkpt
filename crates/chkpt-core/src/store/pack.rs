@@ -1,6 +1,8 @@
 use crate::error::{ChkpttError, Result};
-use crate::store::blob::BlobStore;
+use crate::store::blob::{hash_content, BlobStore};
+use std::io::{BufWriter, Write};
 use std::path::Path;
+use tempfile::NamedTempFile;
 
 const PACK_MAGIC: &[u8; 4] = b"CHKP";
 const PACK_VERSION: u32 = 1;
@@ -15,7 +17,13 @@ struct IndexEntry {
 }
 
 pub struct PackWriter {
-    entries: Vec<(String, Vec<u8>)>, // (hash_hex, compressed_data)
+    entries: Vec<PendingEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingEntry {
+    hash: [u8; 32],
+    compressed: Vec<u8>,
 }
 
 impl Default for PackWriter {
@@ -32,14 +40,16 @@ impl PackWriter {
     }
 
     pub fn add(&mut self, content: &[u8]) -> Result<String> {
-        let hash_hex = crate::store::blob::hash_content(content);
+        let hash_hex = hash_content(content);
         let compressed = zstd::encode_all(content, 3)?;
-        self.entries.push((hash_hex.clone(), compressed));
+        self.add_pre_compressed(hash_hex.clone(), compressed)?;
         Ok(hash_hex)
     }
 
-    pub fn add_pre_compressed(&mut self, hash_hex: String, compressed: Vec<u8>) {
-        self.entries.push((hash_hex, compressed));
+    pub fn add_pre_compressed(&mut self, hash_hex: String, compressed: Vec<u8>) -> Result<()> {
+        let hash = hex_to_bytes(&hash_hex)?;
+        self.entries.push(PendingEntry { hash, compressed });
+        Ok(())
     }
 
     /// Write pack .dat and .idx files. Returns pack hash.
@@ -48,40 +58,50 @@ impl PackWriter {
             return Err(ChkpttError::Other("No entries to pack".into()));
         }
 
-        // Sort entries by hash for binary search in idx
-        self.entries.sort_by(|a, b| a.0.cmp(&b.0));
+        std::fs::create_dir_all(packs_dir)?;
+        self.entries.sort_by(|a, b| a.hash.cmp(&b.hash));
 
-        // Build .dat
-        let mut dat_buf: Vec<u8> = Vec::new();
-        dat_buf.extend_from_slice(PACK_MAGIC);
-        dat_buf.extend_from_slice(&PACK_VERSION.to_le_bytes());
-        dat_buf.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
+        let mut dat_tmp = NamedTempFile::new_in(packs_dir)?;
+        let mut idx_entries: Vec<IndexEntry> = Vec::with_capacity(self.entries.len());
+        let mut dat_hasher = blake3::Hasher::new();
 
-        let mut idx_entries: Vec<IndexEntry> = Vec::new();
+        {
+            let mut dat = BufWriter::with_capacity(1024 * 1024, dat_tmp.as_file_mut());
+            write_hashed(&mut dat, &mut dat_hasher, PACK_MAGIC)?;
+            write_hashed(&mut dat, &mut dat_hasher, &PACK_VERSION.to_le_bytes())?;
+            write_hashed(
+                &mut dat,
+                &mut dat_hasher,
+                &(self.entries.len() as u32).to_le_bytes(),
+            )?;
 
-        for (hash_hex, compressed) in &self.entries {
-            let hash_bytes = hex_to_bytes(hash_hex)?;
-            let offset = dat_buf.len() as u64;
-            dat_buf.extend_from_slice(&hash_bytes);
-            dat_buf.extend_from_slice(&(compressed.len() as u64).to_le_bytes());
-            dat_buf.extend_from_slice(compressed);
-            idx_entries.push(IndexEntry {
-                hash: hash_bytes,
-                offset,
-                size: compressed.len() as u64,
-            });
+            let mut offset = (PACK_MAGIC.len() + std::mem::size_of::<u32>() * 2) as u64;
+            for entry in &self.entries {
+                let compressed_len = entry.compressed.len() as u64;
+                write_hashed(&mut dat, &mut dat_hasher, &entry.hash)?;
+                write_hashed(&mut dat, &mut dat_hasher, &compressed_len.to_le_bytes())?;
+                write_hashed(&mut dat, &mut dat_hasher, &entry.compressed)?;
+                idx_entries.push(IndexEntry {
+                    hash: entry.hash,
+                    offset,
+                    size: compressed_len,
+                });
+                offset += 32 + 8 + compressed_len;
+            }
+
+            dat.flush()?;
         }
 
-        let pack_hash = blake3::hash(&dat_buf).to_hex()[..16].to_string();
+        let pack_hash = dat_hasher.finalize().to_hex()[..16].to_string();
         let dat_path = packs_dir.join(format!("pack-{}.dat", pack_hash));
+        if !dat_path.exists() {
+            dat_tmp
+                .persist(&dat_path)
+                .map_err(|error| ChkpttError::Other(error.error.to_string()))?;
+        }
+
         let idx_path = packs_dir.join(format!("pack-{}.idx", pack_hash));
-
-        // Write .dat
-        std::fs::create_dir_all(packs_dir)?;
-        std::fs::write(&dat_path, &dat_buf)?;
-
-        // Write .idx (sorted by hash)
-        let mut idx_buf: Vec<u8> = Vec::new();
+        let mut idx_buf: Vec<u8> = Vec::with_capacity(idx_entries.len() * IDX_ENTRY_SIZE);
         for entry in &idx_entries {
             idx_buf.extend_from_slice(&entry.hash);
             idx_buf.extend_from_slice(&entry.offset.to_le_bytes());
@@ -237,6 +257,12 @@ pub fn read_object(blob_store: &BlobStore, packs_dir: &Path, hash_hex: &str) -> 
 
 pub fn read_object_from_pack_set(pack_set: &PackSet, hash_hex: &str) -> Result<Vec<u8>> {
     pack_set.read(hash_hex)
+}
+
+fn write_hashed<W: Write>(writer: &mut W, hasher: &mut blake3::Hasher, bytes: &[u8]) -> Result<()> {
+    writer.write_all(bytes)?;
+    hasher.update(bytes);
+    Ok(())
 }
 
 fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {

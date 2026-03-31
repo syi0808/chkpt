@@ -81,9 +81,14 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     let cached_entries = index.entries_by_path()?;
 
     // 6. Create blob store
-    let blob_store = BlobStore::new(layout.objects_dir());
+    let objects_dir = layout.objects_dir();
+    let blob_store = BlobStore::new(objects_dir.clone());
     let packs_dir = layout.packs_dir();
-    let pack_set = PackSet::open_all(&packs_dir)?;
+    let has_loose_objects = store_has_loose_objects(&objects_dir)?;
+    let has_pack_objects = store_has_pack_objects(&packs_dir)?;
+    let pack_set = has_pack_objects
+        .then(|| PackSet::open_all(&packs_dir))
+        .transpose()?;
     let mut pack_writer = PackWriter::new();
     let mut staged_pack_hashes = HashSet::new();
 
@@ -134,11 +139,12 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         } = prepared;
 
         total_bytes += size;
-        if !staged_pack_hashes.contains(&blob_hash_hex)
-            && !blob_store.exists(&blob_hash_hex)
-            && !pack_set.contains(&blob_hash_hex)
-        {
-            pack_writer.add_pre_compressed(blob_hash_hex.clone(), compressed);
+        let exists_externally = (has_loose_objects && blob_store.exists(&blob_hash_hex))
+            || pack_set
+                .as_ref()
+                .is_some_and(|pack_set| pack_set.contains(&blob_hash_hex));
+        if !staged_pack_hashes.contains(&blob_hash_hex) && !exists_externally {
+            pack_writer.add_pre_compressed(blob_hash_hex.clone(), compressed)?;
             staged_pack_hashes.insert(blob_hash_hex.clone());
             new_objects += 1;
         }
@@ -199,6 +205,55 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // 14. Return SaveResult
     Ok(SaveResult { snapshot_id, stats })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn store_has_external_objects(objects_dir: &Path, packs_dir: &Path) -> Result<bool> {
+    Ok(store_has_loose_objects(objects_dir)? || store_has_pack_objects(packs_dir)?)
+}
+
+fn store_has_loose_objects(objects_dir: &Path) -> Result<bool> {
+    if !objects_dir.exists() {
+        return Ok(false);
+    }
+
+    for prefix_entry in std::fs::read_dir(objects_dir)? {
+        let prefix_entry = prefix_entry?;
+        if !prefix_entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        for object_entry in std::fs::read_dir(prefix_entry.path())? {
+            let object_entry = object_entry?;
+            if object_entry.file_type()?.is_file()
+                && !object_entry.file_name().to_string_lossy().ends_with(".tmp")
+            {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn store_has_pack_objects(packs_dir: &Path) -> Result<bool> {
+    if !packs_dir.exists() {
+        return Ok(false);
+    }
+
+    for entry in std::fs::read_dir(packs_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("pack-") && name.ends_with(".dat") {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 fn cached_processed_file(
@@ -413,6 +468,7 @@ fn register_directory_hierarchy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn test_hex_to_bytes() {
@@ -426,5 +482,33 @@ mod tests {
     #[test]
     fn test_hex_to_bytes_invalid_length() {
         assert!(hex_to_bytes("abc").is_err());
+    }
+
+    #[test]
+    fn test_store_has_external_objects_false_for_empty_store() {
+        let dir = TempDir::new().unwrap();
+        let objects_dir = dir.path().join("objects");
+        let packs_dir = dir.path().join("packs");
+        std::fs::create_dir_all(&objects_dir).unwrap();
+        std::fs::create_dir_all(&packs_dir).unwrap();
+
+        assert!(!store_has_external_objects(&objects_dir, &packs_dir).unwrap());
+    }
+
+    #[test]
+    fn test_store_has_external_objects_true_for_loose_or_pack_objects() {
+        let dir = TempDir::new().unwrap();
+        let objects_dir = dir.path().join("objects");
+        let packs_dir = dir.path().join("packs");
+        std::fs::create_dir_all(objects_dir.join("aa")).unwrap();
+        std::fs::create_dir_all(&packs_dir).unwrap();
+        std::fs::write(objects_dir.join("aa").join("bb"), b"compressed").unwrap();
+
+        assert!(store_has_external_objects(&objects_dir, &packs_dir).unwrap());
+
+        std::fs::remove_file(objects_dir.join("aa").join("bb")).unwrap();
+        std::fs::write(packs_dir.join("pack-demo.dat"), b"pack").unwrap();
+
+        assert!(store_has_external_objects(&objects_dir, &packs_dir).unwrap());
     }
 }

@@ -109,3 +109,21 @@ fn test_pack_set_reads_across_multiple_packs() {
     assert_eq!(pack_set.read(&hash_one).unwrap(), b"first-pack");
     assert_eq!(pack_set.read(&hash_two).unwrap(), b"second-pack");
 }
+
+#[test]
+fn test_pack_write_with_precompressed_entries() {
+    let dir = TempDir::new().unwrap();
+    let packs_dir = dir.path().join("packs");
+    std::fs::create_dir_all(&packs_dir).unwrap();
+
+    let content = b"streamed-content".to_vec();
+    let hash = hash_content(&content);
+    let compressed = zstd::encode_all(&content[..], 3).unwrap();
+
+    let mut writer = PackWriter::new();
+    writer.add_pre_compressed(hash.clone(), compressed).unwrap();
+    let pack_hash = writer.finish(&packs_dir).unwrap();
+
+    let reader = PackReader::open(&packs_dir, &pack_hash).unwrap();
+    assert_eq!(reader.read(&hash).unwrap(), content);
+}
