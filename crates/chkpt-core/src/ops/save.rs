@@ -8,9 +8,8 @@ use crate::store::pack::{PackSet, PackWriter};
 use crate::store::snapshot::{Snapshot, SnapshotAttachments, SnapshotStats, SnapshotStore};
 use crate::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::io::{BufReader, Read, Write};
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Default)]
 pub struct SaveOptions {
@@ -52,7 +51,8 @@ struct PreparedFile {
     relative_path: String,
     blob_hash_hex: String,
     blob_hash_bytes: [u8; 32],
-    compressed: Vec<u8>,
+    /// None if this hash was already seen (duplicate content — compression skipped)
+    compressed: Option<Vec<u8>>,
     size: u64,
     mode: u32,
     mtime_secs: i64,
@@ -93,7 +93,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         .then(|| PackSet::open_all(&packs_dir))
         .transpose()?;
     let mut pack_writer = PackWriter::new(&packs_dir)?;
-    let mut staged_pack_hashes = HashSet::new();
+    let staged_pack_hashes: HashSet<[u8; 32]> = HashSet::new();
 
     // 7. Process each scanned file: check index, hash, store blob
     let mut processed_files = Vec::with_capacity(scanned_files.len());
@@ -129,16 +129,13 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     let mut new_objects: u64 = 0;
 
-    // Pipeline: worker threads compress files and send through a bounded channel,
-    // main thread receives and writes to pack immediately. This overlaps compression
-    // with disk I/O and limits peak memory to channel_bound * avg_compressed_size.
-    let channel_bound = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        * 2;
+    // Shared dedup set: workers check before compressing to skip duplicate content
+    let seen_hashes = Arc::new(Mutex::new(staged_pack_hashes));
 
-    for prepared in prepare_files_pipeline(files_to_prepare, channel_bound)? {
-        let prepared = prepared?;
+    // Batch parallel: each thread processes a chunk independently, no channel overhead
+    let prepared_results = prepare_files_batch(&files_to_prepare, &seen_hashes)?;
+
+    for prepared in prepared_results {
         let PreparedFile {
             relative_path,
             blob_hash_hex,
@@ -152,14 +149,15 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         } = prepared;
 
         total_bytes += size;
-        let exists_externally = (has_loose_objects && blob_store.exists(&blob_hash_hex))
-            || pack_set
-                .as_ref()
-                .is_some_and(|pack_set| pack_set.contains(&blob_hash_hex));
-        if !staged_pack_hashes.contains(&blob_hash_hex) && !exists_externally {
-            pack_writer.add_pre_compressed(blob_hash_hex.clone(), compressed)?;
-            staged_pack_hashes.insert(blob_hash_hex.clone());
-            new_objects += 1;
+        if let Some(compressed) = compressed {
+            let exists_externally = (has_loose_objects && blob_store.exists(&blob_hash_hex))
+                || pack_set
+                    .as_ref()
+                    .is_some_and(|ps| ps.contains(&blob_hash_hex));
+            if !exists_externally {
+                pack_writer.add_pre_compressed(blob_hash_hex, compressed)?;
+                new_objects += 1;
+            }
         }
 
         updated_entries.push(FileEntry {
@@ -182,14 +180,28 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         pack_writer.finish()?;
     }
 
-    // 8. Build tree bottom-up
-    let tree_store = TreeStore::new(layout.trees_dir());
-    let root_tree_hash_hex = build_tree(&processed_files, &tree_store)?;
-    let root_tree_hash = hex_to_bytes(&root_tree_hash_hex)?;
-
-    // 9. Find latest snapshot for parent_snapshot_id
+    // 8. Build tree bottom-up (skip if nothing changed)
     let snapshot_store = SnapshotStore::new(layout.snapshots_dir());
-    let parent_snapshot_id = snapshot_store.latest()?.map(|s| s.id);
+    let latest_snapshot = snapshot_store.latest()?;
+
+    let (root_tree_hash, _root_tree_hash_hex) =
+        if new_objects == 0 && removed_paths.is_empty() {
+            if let Some(ref snap) = latest_snapshot {
+                // Nothing changed — reuse previous tree hash (skip build entirely)
+                (snap.root_tree_hash, String::new())
+            } else {
+                let tree_store = TreeStore::new(layout.trees_dir());
+                let hex = build_tree(&processed_files, &tree_store)?;
+                (hex_to_bytes(&hex)?, hex)
+            }
+        } else {
+            let tree_store = TreeStore::new(layout.trees_dir());
+            let hex = build_tree(&processed_files, &tree_store)?;
+            (hex_to_bytes(&hex)?, hex)
+        };
+
+    // 9. Find latest snapshot for parent_snapshot_id (already fetched above)
+    let parent_snapshot_id = latest_snapshot.map(|s| s.id);
 
     // 10. Create Snapshot
     let stats = SnapshotStats {
@@ -290,26 +302,37 @@ fn cached_processed_file(
     None
 }
 
-fn prepare_file(scanned: &ScannedFile) -> Result<PreparedFile> {
-    let file = std::fs::File::open(&scanned.absolute_path)?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = blake3::Hasher::new();
-    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3)?;
-    let mut buffer = [0u8; 64 * 1024];
+fn prepare_file(
+    scanned: &ScannedFile,
+    seen_hashes: &Mutex<HashSet<[u8; 32]>>,
+) -> Result<PreparedFile> {
+    // Read file with pre-allocated buffer (skip fstat overhead of fs::read)
+    let content = {
+        use std::io::Read;
+        let mut file = std::fs::File::open(&scanned.absolute_path)?;
+        let mut buf = Vec::with_capacity(scanned.size as usize);
+        file.read_to_end(&mut buf)?;
+        buf
+    };
 
-    loop {
-        let bytes_read = reader.read(&mut buffer)?;
-        if bytes_read == 0 {
-            break;
-        }
-        let chunk = &buffer[..bytes_read];
-        hasher.update(chunk);
-        encoder.write_all(chunk)?;
-    }
+    // Hash (BLAKE3 is ~6 GB/s, negligible cost)
+    let hash = blake3::hash(&content);
+    let blob_hash_bytes: [u8; 32] = *hash.as_bytes();
 
-    let compressed = encoder.finish()?;
-    let blob_hash_hex = hasher.finalize().to_hex().to_string();
-    let blob_hash_bytes = hex_to_bytes(&blob_hash_hex)?;
+    // Only compress if this hash hasn't been seen yet (use raw bytes, no hex conversion)
+    let is_new = {
+        let mut set = seen_hashes.lock().unwrap();
+        set.insert(blob_hash_bytes)
+    };
+
+    let compressed = if is_new {
+        Some(zstd::encode_all(&content[..], 1)?)
+    } else {
+        None
+    };
+
+    // Defer hex conversion to caller (only needed for pack writer)
+    let blob_hash_hex = hash.to_hex().to_string();
 
     Ok(PreparedFile {
         relative_path: scanned.relative_path.clone(),
@@ -324,57 +347,58 @@ fn prepare_file(scanned: &ScannedFile) -> Result<PreparedFile> {
     })
 }
 
-/// Prepare files using a producer-consumer pipeline.
-///
-/// Worker threads compress files and send results through a bounded channel.
-/// The caller iterates over the receiver, consuming results as they arrive.
-/// This overlaps compression (CPU) with pack writing (I/O).
-fn prepare_files_pipeline(
-    scanned_files: Vec<&ScannedFile>,
-    channel_bound: usize,
-) -> Result<mpsc::IntoIter<Result<PreparedFile>>> {
+/// Prepare files in parallel batches.
+/// Each thread processes a chunk independently and collects results in a local Vec.
+/// No channel overhead — threads run at full speed.
+fn prepare_files_batch(
+    scanned_files: &[&ScannedFile],
+    seen_hashes: &Arc<Mutex<HashSet<[u8; 32]>>>,
+) -> Result<Vec<PreparedFile>> {
     if scanned_files.is_empty() {
-        let (tx, rx) = mpsc::sync_channel(0);
-        drop(tx);
-        return Ok(rx.into_iter());
+        return Ok(Vec::new());
     }
 
-    let (tx, rx) = mpsc::sync_channel::<Result<PreparedFile>>(channel_bound);
+    let worker_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(scanned_files.len());
 
-    // Owned copies for the spawned thread (can't send references across spawn boundary)
-    let owned_files: Vec<ScannedFile> = scanned_files.into_iter().cloned().collect();
+    if worker_count <= 1 {
+        return scanned_files
+            .iter()
+            .map(|s| prepare_file(s, seen_hashes))
+            .collect();
+    }
 
-    std::thread::spawn(move || {
-        let worker_count = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-            .min(owned_files.len());
+    let chunk_size = scanned_files.len().div_ceil(worker_count);
 
-        if worker_count <= 1 {
-            for scanned in &owned_files {
-                if tx.send(prepare_file(scanned)).is_err() {
-                    return;
-                }
-            }
-            return;
-        }
+    let results: Vec<Vec<Result<PreparedFile>>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = scanned_files
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(|| {
+                    chunk
+                        .iter()
+                        .map(|scanned| prepare_file(scanned, seen_hashes))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
 
-        let chunk_size = owned_files.len().div_ceil(worker_count);
-        std::thread::scope(|scope| {
-            for chunk in owned_files.chunks(chunk_size) {
-                let tx = tx.clone();
-                scope.spawn(move || {
-                    for scanned in chunk {
-                        if tx.send(prepare_file(scanned)).is_err() {
-                            return;
-                        }
-                    }
-                });
-            }
-        });
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect()
     });
 
-    Ok(rx.into_iter())
+    // Flatten and propagate errors
+    let mut all = Vec::with_capacity(scanned_files.len());
+    for chunk_results in results {
+        for result in chunk_results {
+            all.push(result?);
+        }
+    }
+    Ok(all)
 }
 
 /// Build tree structure bottom-up from processed files.
@@ -392,36 +416,28 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
         let parent = if let Some(pos) = pf.relative_path.rfind('/') {
             pf.relative_path[..pos].to_string()
         } else {
-            String::new() // root directory
+            String::new()
         };
         dir_files.entry(parent.clone()).or_default().push(pf);
         register_directory_hierarchy(&parent, &mut all_dirs, &mut child_dirs);
     }
 
-    // Build trees bottom-up: process deepest directories first
+    // Sort directories bottom-up (deepest first)
     let mut dir_list: Vec<String> = all_dirs.into_iter().collect();
-    // Sort by depth (deepest first), then alphabetically for same depth
-    dir_list.sort_by(|a, b| {
-        let depth_a = if a.is_empty() {
-            0
-        } else {
-            a.matches('/').count() + 1
-        };
-        let depth_b = if b.is_empty() {
-            0
-        } else {
-            b.matches('/').count() + 1
-        };
+    dir_list.sort_unstable_by(|a, b| {
+        let depth_a = if a.is_empty() { 0 } else { a.matches('/').count() + 1 };
+        let depth_b = if b.is_empty() { 0 } else { b.matches('/').count() + 1 };
         depth_b.cmp(&depth_a).then_with(|| a.cmp(b))
     });
 
-    // Map from directory path to its tree hash
+    // Phase 1: Compute all tree hashes and encoded data in memory
     let mut dir_hashes: BTreeMap<String, String> = BTreeMap::new();
+    let mut pack_entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(dir_list.len());
+    let mut known_hashes: HashSet<String> = HashSet::with_capacity(dir_list.len());
 
     for dir in &dir_list {
         let mut entries: Vec<TreeEntry> = Vec::new();
 
-        // Add file entries for this directory
         if let Some(files) = dir_files.get(dir) {
             for pf in files {
                 let name = if let Some(pos) = pf.relative_path.rfind('/') {
@@ -439,7 +455,6 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
             }
         }
 
-        // Add subdirectory entries (directories whose parent is this directory)
         if let Some(children) = child_dirs.get(dir) {
             for sub_dir in children {
                 let sub_hash = dir_hashes.get(sub_dir).ok_or_else(|| {
@@ -460,12 +475,19 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
             }
         }
 
-        // Write tree and store hash
-        let tree_hash = tree_store.write(&entries)?;
-        dir_hashes.insert(dir.clone(), tree_hash);
+        entries.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        let encoded = bitcode::encode(&entries);
+        let hash_hex = blake3::hash(&encoded).to_hex().to_string();
+
+        dir_hashes.insert(dir.clone(), hash_hex.clone());
+        if known_hashes.insert(hash_hex.clone()) {
+            pack_entries.push((hash_hex, encoded));
+        }
     }
 
-    // Return root tree hash
+    // Phase 2: Write all trees to a single pack file (1 write instead of 37K+)
+    tree_store.write_pack(&pack_entries)?;
+
     dir_hashes
         .get("")
         .cloned()

@@ -1,7 +1,7 @@
 use crate::error::{ChkpttError, Result};
 use crate::store::blob::{hash_content, BlobStore};
 use memmap2::Mmap;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
@@ -19,7 +19,8 @@ struct IndexEntry {
 }
 
 pub struct PackWriter {
-    dat_tmp: NamedTempFile,
+    writer: BufWriter<NamedTempFile>,
+    hasher: blake3::Hasher,
     idx_entries: Vec<IndexEntry>,
     offset: u64,
     packs_dir: PathBuf,
@@ -28,11 +29,16 @@ pub struct PackWriter {
 impl PackWriter {
     pub fn new(packs_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(packs_dir)?;
-        let mut dat_tmp = NamedTempFile::new_in(packs_dir)?;
-        // Write 12-byte placeholder header
-        dat_tmp.write_all(&[0u8; HEADER_SIZE as usize])?;
+        let dat_tmp = NamedTempFile::new_in(packs_dir)?;
+        let mut writer = BufWriter::with_capacity(256 * 1024, dat_tmp);
+        // Write 12-byte placeholder header (will be overwritten in finish)
+        let placeholder = [0u8; HEADER_SIZE as usize];
+        writer.write_all(&placeholder)?;
+        // Start incremental hasher — header will be re-hashed in finish()
+        let hasher = blake3::Hasher::new();
         Ok(Self {
-            dat_tmp,
+            writer,
+            hasher,
             idx_entries: Vec::new(),
             offset: HEADER_SIZE,
             packs_dir: packs_dir.to_path_buf(),
@@ -41,7 +47,7 @@ impl PackWriter {
 
     pub fn add(&mut self, content: &[u8]) -> Result<String> {
         let hash_hex = hash_content(content);
-        let compressed = zstd::encode_all(content, 3)?;
+        let compressed = zstd::encode_all(content, 1)?;
         self.add_pre_compressed(hash_hex.clone(), compressed)?;
         Ok(hash_hex)
     }
@@ -50,11 +56,15 @@ impl PackWriter {
         let hash = hex_to_bytes(&hash_hex)?;
         let compressed_len = compressed.len() as u64;
 
-        // Write entry directly to temp file: hash(32) + compressed_len(8) + data(N)
-        let file = self.dat_tmp.as_file_mut();
-        file.write_all(&hash)?;
-        file.write_all(&compressed_len.to_le_bytes())?;
-        file.write_all(&compressed)?;
+        // Write entry to BufWriter: hash(32) + compressed_len(8) + data(N)
+        self.writer.write_all(&hash)?;
+        self.writer.write_all(&compressed_len.to_le_bytes())?;
+        self.writer.write_all(&compressed)?;
+
+        // Incremental hash of entry data
+        self.hasher.update(&hash);
+        self.hasher.update(&compressed_len.to_le_bytes());
+        self.hasher.update(&compressed);
 
         self.idx_entries.push(IndexEntry {
             hash,
@@ -70,47 +80,43 @@ impl PackWriter {
         self.idx_entries.is_empty()
     }
 
-    /// Finalize: write real header, hash entire file, persist .dat, write .idx.
+    /// Finalize: write real header, persist .dat, write .idx.
     /// Returns pack hash.
     pub fn finish(mut self) -> Result<String> {
         if self.idx_entries.is_empty() {
             return Err(ChkpttError::Other("No entries to pack".into()));
         }
 
+        // Flush BufWriter and get the underlying file
+        self.writer.flush()?;
+        let mut dat_tmp = self.writer.into_inner().map_err(|e| e.into_error())?;
+
         let count = self.idx_entries.len() as u32;
-        let file = self.dat_tmp.as_file_mut();
 
-        // Seek to 0 and write real header
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(PACK_MAGIC)?;
-        file.write_all(&PACK_VERSION.to_le_bytes())?;
-        file.write_all(&count.to_le_bytes())?;
-        file.flush()?;
+        // Write real header
+        let mut header = [0u8; HEADER_SIZE as usize];
+        header[0..4].copy_from_slice(PACK_MAGIC);
+        header[4..8].copy_from_slice(&PACK_VERSION.to_le_bytes());
+        header[8..12].copy_from_slice(&count.to_le_bytes());
 
-        // Hash entire file by reading in 64KB chunks
-        file.seek(SeekFrom::Start(0))?;
-        let mut hasher = blake3::Hasher::new();
-        let mut reader = BufReader::with_capacity(64 * 1024, &*file);
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let n = reader.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-        let pack_hash = hasher.finalize().to_hex()[..16].to_string();
+        dat_tmp.seek(SeekFrom::Start(0))?;
+        dat_tmp.write_all(&header)?;
+        dat_tmp.flush()?;
+
+        // Finalize hash: include header in the hash
+        self.hasher.update(&header);
+        let pack_hash = self.hasher.finalize().to_hex()[..16].to_string();
 
         // Persist .dat file
         let dat_path = self.packs_dir.join(format!("pack-{}.dat", pack_hash));
         if !dat_path.exists() {
-            self.dat_tmp
+            dat_tmp
                 .persist(&dat_path)
                 .map_err(|error| ChkpttError::Other(error.error.to_string()))?;
         }
 
         // Sort idx entries by hash for binary search
-        self.idx_entries.sort_by(|a, b| a.hash.cmp(&b.hash));
+        self.idx_entries.sort_unstable_by(|a, b| a.hash.cmp(&b.hash));
 
         // Write .idx file
         let idx_path = self.packs_dir.join(format!("pack-{}.idx", pack_hash));
