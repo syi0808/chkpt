@@ -71,6 +71,36 @@ fn test_scan_excludes_node_modules_by_default() {
 }
 
 #[test]
+fn test_scan_excludes_nested_dependency_directories_by_default() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("packages/app/node_modules/pkg")).unwrap();
+    fs::create_dir_all(dir.path().join("services/api/.venv/lib")).unwrap();
+    fs::create_dir_all(dir.path().join("crates/core/target/debug")).unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+
+    fs::write(
+        dir.path().join("packages/app/node_modules/pkg/index.js"),
+        "dep",
+    )
+    .unwrap();
+    fs::write(dir.path().join("services/api/.venv/lib/site.py"), "dep").unwrap();
+    fs::write(dir.path().join("crates/core/target/debug/app"), "artifact").unwrap();
+    fs::write(dir.path().join("src/targeting.rs"), "pub fn targeting() {}").unwrap();
+    fs::write(dir.path().join("src/venv_config.rs"), "pub fn cfg() {}").unwrap();
+
+    let files = scan_workspace(dir.path(), None).unwrap();
+    let paths: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+
+    assert!(!paths
+        .iter()
+        .any(|p| p.starts_with("packages/app/node_modules/")));
+    assert!(!paths.iter().any(|p| p.starts_with("services/api/.venv/")));
+    assert!(!paths.iter().any(|p| p.starts_with("crates/core/target/")));
+    assert!(paths.contains(&"src/targeting.rs"));
+    assert!(paths.contains(&"src/venv_config.rs"));
+}
+
+#[test]
 fn test_scanned_file_has_metadata() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("test.txt"), "content").unwrap();

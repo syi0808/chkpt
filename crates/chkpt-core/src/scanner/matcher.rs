@@ -2,7 +2,19 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::path::Path;
 
 /// Built-in directories that are always excluded from scanning.
-const BUILTIN_EXCLUSIONS: &[&str] = &[".git/", "node_modules/", ".chkpt/", "target/"];
+const BUILTIN_EXCLUSIONS: &[&str] = &[
+    ".git",
+    ".chkpt",
+    "target",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pypackages__",
+    ".tox",
+    ".nox",
+    ".gradle",
+    ".m2",
+];
 
 /// Matcher that combines built-in exclusions with .chkptignore patterns.
 pub struct IgnoreMatcher {
@@ -43,12 +55,8 @@ impl IgnoreMatcher {
     /// `is_dir` indicates whether the path is a directory.
     pub fn is_ignored(&self, relative_path: &str, is_dir: bool) -> bool {
         // Check built-in exclusions first
-        for exclusion in BUILTIN_EXCLUSIONS {
-            let dir_name = exclusion.trim_end_matches('/');
-            // Match the directory itself or any path starting with it
-            if relative_path == dir_name || relative_path.starts_with(&format!("{}/", dir_name)) {
-                return true;
-            }
+        if has_excluded_directory_component(relative_path, is_dir) {
+            return true;
         }
 
         // Check .chkptignore patterns
@@ -61,6 +69,21 @@ impl IgnoreMatcher {
 
         false
     }
+}
+
+fn has_excluded_directory_component(relative_path: &str, is_dir: bool) -> bool {
+    let mut components = relative_path.split('/').peekable();
+
+    while let Some(component) = components.next() {
+        let is_last = components.peek().is_none();
+        let is_directory_component = is_dir || !is_last;
+
+        if is_directory_component && BUILTIN_EXCLUSIONS.contains(&component) {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -80,6 +103,12 @@ mod tests {
         assert!(matcher.is_ignored(".chkpt/config", false));
         assert!(matcher.is_ignored("target", true));
         assert!(matcher.is_ignored("target/debug/main", false));
+        assert!(matcher.is_ignored("packages/app/node_modules", true));
+        assert!(matcher.is_ignored("packages/app/node_modules/pkg/index.js", false));
+        assert!(matcher.is_ignored("services/api/.venv", true));
+        assert!(matcher.is_ignored("services/api/.venv/lib/site.py", false));
+        assert!(matcher.is_ignored("crates/core/target", true));
+        assert!(matcher.is_ignored("crates/core/target/debug/app", false));
     }
 
     #[test]
@@ -88,6 +117,8 @@ mod tests {
         assert!(!matcher.is_ignored("src/main.rs", false));
         assert!(!matcher.is_ignored("README.md", false));
         assert!(!matcher.is_ignored(".gitignore", false));
+        assert!(!matcher.is_ignored("src/targeting.rs", false));
+        assert!(!matcher.is_ignored("src/venv_config.rs", false));
     }
 
     #[test]
