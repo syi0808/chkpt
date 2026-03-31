@@ -45,6 +45,10 @@ impl StoreLayout {
         self.base.join("snapshots")
     }
 
+    pub fn catalog_path(&self) -> PathBuf {
+        self.base.join("catalog.sqlite")
+    }
+
     pub fn objects_dir(&self) -> PathBuf {
         self.base.join("objects")
     }

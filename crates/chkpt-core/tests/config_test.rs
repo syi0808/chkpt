@@ -23,6 +23,7 @@ fn test_store_layout_paths() {
     let layout = StoreLayout::from_home_dir("/tmp/chkpt-home", "abcdef1234567890");
     let base = layout.base_dir();
     assert!(base.ends_with("abcdef1234567890"));
+    assert!(layout.catalog_path().ends_with("catalog.sqlite"));
     assert!(layout.snapshots_dir().ends_with("snapshots"));
     assert!(layout.objects_dir().ends_with("objects"));
     assert!(layout.trees_dir().ends_with("trees"));

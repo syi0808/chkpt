@@ -10,7 +10,7 @@ pub struct SnapshotAttachments {
     pub git_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotStats {
     pub total_files: u64,
     pub total_bytes: u64,

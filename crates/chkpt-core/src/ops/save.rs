@@ -6,6 +6,7 @@ use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
 use crate::store::blob::{read_path_bytes, BlobStore};
 use crate::store::pack::{PackSet, PackWriter};
+use crate::store::catalog::{BlobLocation, CatalogSnapshot, ManifestEntry, MetadataCatalog};
 use crate::store::snapshot::{Snapshot, SnapshotAttachments, SnapshotStats, SnapshotStore};
 use crate::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -67,6 +68,11 @@ struct PreparedFile {
     entry_type: EntryType,
 }
 
+struct NewBlobRecord {
+    blob_hash: [u8; 32],
+    size: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct HardlinkKey {
     device: u64,
@@ -118,6 +124,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // 3. Acquire project lock
     let _lock = ProjectLock::acquire(&layout.locks_dir())?;
+    let catalog = MetadataCatalog::open(layout.catalog_path())?;
 
     // 4. Scan workspace (respect .chkptignore)
     let scanned_files =
@@ -148,6 +155,9 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     let mut processed_files = Vec::with_capacity(scanned_files.len());
     let mut files_to_prepare = Vec::new();
     let mut updated_entries = Vec::new();
+    let mut manifest = Vec::with_capacity(scanned_files.len());
+    let mut blob_locations_to_record = Vec::new();
+    let mut new_blob_records = Vec::new();
     let mut total_bytes: u64 = 0;
     let mut current_paths =
         (!cached_entries.is_empty()).then(|| HashSet::with_capacity(scanned_files.len()));
@@ -161,6 +171,12 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
             cached_processed_file(scanned, cached_entries.get(&scanned.relative_path))
         {
             total_bytes += processed.size;
+            manifest.push(ManifestEntry {
+                path: processed.relative_path.clone(),
+                blob_hash: processed.blob_hash_bytes,
+                size: processed.size,
+                mode: processed.mode,
+            });
             processed_files.push(processed);
         } else {
             files_to_prepare.push(scanned);
@@ -215,12 +231,24 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
             total_bytes += size;
             if let Some(compressed) = compressed {
-                let exists_externally = (has_loose_objects && blob_store.exists(&blob_hash_hex))
-                    || pack_set
-                        .as_ref()
-                        .is_some_and(|ps| ps.contains(&blob_hash_hex));
-                if !exists_externally {
+                let exists_loose = has_loose_objects && blob_store.exists(&blob_hash_hex);
+                let exists_in_pack = pack_set
+                    .as_ref()
+                    .is_some_and(|ps| ps.contains(&blob_hash_hex));
+                if exists_loose {
+                    blob_locations_to_record.push((
+                        blob_hash_bytes,
+                        BlobLocation {
+                            pack_hash: None,
+                            size,
+                        },
+                    ));
+                } else if !exists_in_pack {
                     pack_writer.add_pre_compressed(blob_hash_hex, compressed)?;
+                    new_blob_records.push(NewBlobRecord {
+                        blob_hash: blob_hash_bytes,
+                        size,
+                    });
                     new_objects += 1;
                 }
             }
@@ -241,12 +269,32 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
                 mode,
                 entry_type,
             });
+            manifest.push(ManifestEntry {
+                path: updated_entries.last().unwrap().path.clone(),
+                blob_hash: blob_hash_bytes,
+                size,
+                mode,
+            });
             Ok(())
         },
     )?;
-    if !pack_writer.is_empty() {
-        pack_writer.finish()?;
+    let new_pack_hash = if !pack_writer.is_empty() {
+        Some(pack_writer.finish()?)
+    } else {
+        None
+    };
+    if let Some(pack_hash) = new_pack_hash {
+        for blob in &new_blob_records {
+            blob_locations_to_record.push((
+                blob.blob_hash,
+                BlobLocation {
+                    pack_hash: Some(pack_hash.clone()),
+                    size: blob.size,
+                },
+            ));
+        }
     }
+    catalog.bulk_upsert_blob_locations(&blob_locations_to_record)?;
     emit(&options.progress, ProgressEvent::PackComplete);
 
     // 8. Build tree bottom-up (skip if nothing changed)
@@ -269,7 +317,10 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     };
 
     // 9. Find latest snapshot for parent_snapshot_id (already fetched above)
-    let parent_snapshot_id = latest_snapshot.map(|s| s.id);
+    let parent_snapshot_id = catalog
+        .latest_snapshot()?
+        .map(|snapshot| snapshot.id)
+        .or_else(|| latest_snapshot.map(|snapshot| snapshot.id));
 
     // 10. Create Snapshot
     let stats = SnapshotStats {
@@ -287,9 +338,18 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     );
 
     let snapshot_id = snapshot.id.clone();
+    let catalog_snapshot = CatalogSnapshot {
+        id: snapshot.id.clone(),
+        created_at: snapshot.created_at,
+        message: snapshot.message.clone(),
+        parent_snapshot_id: snapshot.parent_snapshot_id.clone(),
+        stats: stats.clone(),
+    };
+    manifest.sort_unstable_by(|left, right| left.path.cmp(&right.path));
 
     // 11. Save snapshot
     snapshot_store.save(&snapshot)?;
+    catalog.insert_snapshot(&catalog_snapshot, &manifest)?;
 
     // 12. Update only changed index entries and remove stale paths.
     index.apply_changes(&removed_paths, &updated_entries)?;

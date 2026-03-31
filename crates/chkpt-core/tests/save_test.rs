@@ -2,6 +2,7 @@ use chkpt_core::config::{project_id_from_path, StoreLayout};
 use chkpt_core::index::FileIndex;
 use chkpt_core::ops::save::{save, SaveOptions};
 use chkpt_core::store::blob::BlobStore;
+use chkpt_core::store::catalog::MetadataCatalog;
 use chkpt_core::store::pack::pack_loose_objects;
 use std::fs;
 use tempfile::TempDir;
@@ -128,4 +129,31 @@ fn test_save_include_deps_counts_hardlinked_files_without_new_objects_per_link()
 
     assert_eq!(result.stats.total_files, 2);
     assert_eq!(result.stats.new_objects, 1);
+}
+
+#[test]
+fn test_save_persists_catalog() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "same").unwrap();
+
+    let result = save(workspace.path(), SaveOptions::default()).unwrap();
+    assert_eq!(result.stats.total_files, 1);
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    assert!(layout.catalog_path().exists());
+
+    let catalog = MetadataCatalog::open(layout.catalog_path()).unwrap();
+    let manifest = catalog.snapshot_manifest(&result.snapshot_id).unwrap();
+    assert_eq!(manifest.len(), 1);
+}
+
+#[test]
+fn test_save_creates_index_db() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "same").unwrap();
+
+    save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    assert!(layout.index_path().exists());
 }

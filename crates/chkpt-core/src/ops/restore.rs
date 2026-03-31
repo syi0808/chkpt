@@ -5,6 +5,7 @@ use crate::ops::io_order::sort_scanned_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
 use crate::store::blob::{hash_path, BlobStore};
+use crate::store::catalog::{ManifestEntry, MetadataCatalog};
 use crate::store::pack::{PackLocation, PackSet};
 use crate::store::snapshot::SnapshotStore;
 use crate::store::tree::{EntryType, TreeStore};
@@ -108,6 +109,21 @@ fn collect_tree_files(
         }
     }
     Ok(())
+}
+
+fn target_state_from_manifest(manifest: &[ManifestEntry]) -> BTreeMap<String, TargetFileState> {
+    manifest
+        .iter()
+        .map(|entry| {
+            (
+                entry.path.clone(),
+                TargetFileState {
+                    hash_hex: bytes_to_hex(&entry.blob_hash),
+                    is_symlink: mode_is_symlink(entry.mode),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Scan the current workspace to get a mapping of (relative_path -> content_hash_hex).
@@ -403,49 +419,24 @@ pub fn restore(
 
     // 2. Acquire project lock
     let _lock = ProjectLock::acquire(&layout.locks_dir())?;
+    let catalog = MetadataCatalog::open(layout.catalog_path())?;
 
     // 3. Resolve snapshot ID
     let snapshot_store = SnapshotStore::new(layout.snapshots_dir());
-    let resolved_snapshot = if snapshot_id == "latest" {
-        snapshot_store
-            .latest()?
-            .ok_or_else(|| ChkpttError::SnapshotNotFound("latest (no snapshots exist)".into()))?
-    } else {
-        // Try exact match first
-        match snapshot_store.load(snapshot_id) {
-            Ok(snap) => snap,
-            Err(ChkpttError::SnapshotNotFound(_)) => {
-                // Try prefix match
-                let all_ids = snapshot_store.all_ids()?;
-                let matches: Vec<_> = all_ids
-                    .iter()
-                    .filter(|id| id.starts_with(snapshot_id))
-                    .collect();
-                match matches.len() {
-                    0 => {
-                        return Err(ChkpttError::SnapshotNotFound(snapshot_id.to_string()));
-                    }
-                    1 => snapshot_store.load(matches[0])?,
-                    _ => {
-                        return Err(ChkpttError::Other(format!(
-                            "Ambiguous snapshot prefix '{}': matches {} snapshots",
-                            snapshot_id,
-                            matches.len()
-                        )));
-                    }
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    };
-
-    let resolved_id = resolved_snapshot.id.clone();
+    let resolved_id = resolve_snapshot_id(&catalog, &snapshot_store, snapshot_id)?;
 
     // 4. Load snapshot's tree to get target state (path -> blob_hash_hex)
-    let tree_store = TreeStore::new(layout.trees_dir());
-    let root_tree_hash_hex = bytes_to_hex(&resolved_snapshot.root_tree_hash);
-    let mut target_state: BTreeMap<String, TargetFileState> = BTreeMap::new();
-    collect_tree_files(&tree_store, &root_tree_hash_hex, "", &mut target_state)?;
+    let manifest = catalog.snapshot_manifest(&resolved_id)?;
+    let target_state = if manifest.is_empty() {
+        let resolved_snapshot = snapshot_store.load(&resolved_id)?;
+        let tree_store = TreeStore::new(layout.trees_dir());
+        let root_tree_hash_hex = bytes_to_hex(&resolved_snapshot.root_tree_hash);
+        let mut state = BTreeMap::new();
+        collect_tree_files(&tree_store, &root_tree_hash_hex, "", &mut state)?;
+        state
+    } else {
+        target_state_from_manifest(&manifest)
+    };
     let target_includes_deps = target_state.keys().any(|path| path_contains_dependency_dir(path));
 
     // 5. Scan current workspace to get current state (path -> content_hash_hex)
@@ -540,6 +531,50 @@ pub fn restore(
     Ok(result)
 }
 
+fn resolve_snapshot_id(
+    catalog: &MetadataCatalog,
+    snapshot_store: &SnapshotStore,
+    snapshot_ref: &str,
+) -> Result<String> {
+    match catalog.resolve_snapshot_ref(snapshot_ref) {
+        Ok(snapshot) => Ok(snapshot.id),
+        Err(ChkpttError::SnapshotNotFound(_)) => {
+            let resolved_snapshot = if snapshot_ref == "latest" {
+                snapshot_store.latest()?.ok_or_else(|| {
+                    ChkpttError::SnapshotNotFound("latest (no snapshots exist)".into())
+                })?
+            } else {
+                match snapshot_store.load(snapshot_ref) {
+                    Ok(snapshot) => snapshot,
+                    Err(ChkpttError::SnapshotNotFound(_)) => {
+                        let all_ids = snapshot_store.all_ids()?;
+                        let matches: Vec<_> = all_ids
+                            .iter()
+                            .filter(|id| id.starts_with(snapshot_ref))
+                            .collect();
+                        match matches.len() {
+                            0 => {
+                                return Err(ChkpttError::SnapshotNotFound(snapshot_ref.to_string()));
+                            }
+                            1 => snapshot_store.load(matches[0])?,
+                            _ => {
+                                return Err(ChkpttError::Other(format!(
+                                    "Ambiguous snapshot prefix '{}': matches {} snapshots",
+                                    snapshot_ref,
+                                    matches.len()
+                                )));
+                            }
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            Ok(resolved_snapshot.id)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn path_contains_dependency_dir(relative_path: &str) -> bool {
     relative_path.split('/').any(|component| {
         matches!(
@@ -554,6 +589,18 @@ fn path_contains_dependency_dir(relative_path: &str) -> bool {
                 | ".m2"
         )
     })
+}
+
+fn mode_is_symlink(mode: u32) -> bool {
+    #[cfg(unix)]
+    {
+        (mode & 0o170000) == 0o120000
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        false
+    }
 }
 
 /// Convert a 64-char hex string to a [u8; 32] array.

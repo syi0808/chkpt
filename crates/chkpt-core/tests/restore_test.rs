@@ -199,3 +199,27 @@ fn test_restore_round_trips_symlinks() {
         std::path::PathBuf::from("src/main.js")
     );
 }
+
+#[test]
+fn test_restore_works_without_snapshot_or_tree_files() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "v1").unwrap();
+    let snapshot = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    fs::remove_dir_all(layout.snapshots_dir()).unwrap();
+    fs::remove_dir_all(layout.trees_dir()).unwrap();
+
+    fs::write(workspace.path().join("a.txt"), "v2").unwrap();
+    restore(
+        workspace.path(),
+        &snapshot.snapshot_id,
+        RestoreOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+        "v1"
+    );
+}
