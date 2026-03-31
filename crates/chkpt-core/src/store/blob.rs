@@ -1,7 +1,10 @@
 use crate::error::{ChkpttError, Result};
+use memmap2::Mmap;
 use std::io::{BufReader, Read};
 use std::path::Path;
 use std::path::PathBuf;
+
+const HASH_FILE_MMAP_THRESHOLD: u64 = 256 * 1024;
 
 /// Compute BLAKE3 hash of content, return 64-char hex string.
 pub fn hash_content(content: &[u8]) -> String {
@@ -10,6 +13,16 @@ pub fn hash_content(content: &[u8]) -> String {
 
 /// Compute BLAKE3 hash of a file without loading the full file into memory.
 pub fn hash_file(path: &Path) -> Result<String> {
+    if let Ok(metadata) = std::fs::metadata(path) {
+        if metadata.len() >= HASH_FILE_MMAP_THRESHOLD {
+            if let Ok(file) = std::fs::File::open(path) {
+                if let Ok(mmap) = unsafe { Mmap::map(&file) } {
+                    return Ok(blake3::hash(&mmap).to_hex().to_string());
+                }
+            }
+        }
+    }
+
     let file = std::fs::File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut hasher = blake3::Hasher::new();

@@ -65,6 +65,31 @@ struct PreparedFile {
     inode: Option<u64>,
 }
 
+const SEEN_HASH_SHARDS: usize = 64;
+
+struct ShardedSeenHashes {
+    shards: Vec<Mutex<HashSet<[u8; 32]>>>,
+}
+
+impl ShardedSeenHashes {
+    fn new(expected_entries: usize) -> Self {
+        let shard_count = SEEN_HASH_SHARDS.max(1);
+        let per_shard_capacity = expected_entries.div_ceil(shard_count).max(1);
+        let mut shards = Vec::with_capacity(shard_count);
+        for _ in 0..shard_count {
+            shards.push(Mutex::new(HashSet::with_capacity(per_shard_capacity)));
+        }
+        Self { shards }
+    }
+
+    #[inline]
+    fn insert(&self, hash: [u8; 32]) -> bool {
+        let shard_index = ((hash[0] as usize) << 8 | hash[1] as usize) % self.shards.len();
+        let mut shard = self.shards[shard_index].lock().unwrap();
+        shard.insert(hash)
+    }
+}
+
 /// Save a checkpoint of the workspace.
 ///
 /// This is the main orchestrating function that ties together scanning,
@@ -104,7 +129,6 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         .then(|| PackSet::open_all(&packs_dir))
         .transpose()?;
     let mut pack_writer = PackWriter::new(&packs_dir)?;
-    let staged_pack_hashes: HashSet<[u8; 32]> = HashSet::new();
 
     // 7. Process each scanned file: check index, hash, store blob
     let mut processed_files = Vec::with_capacity(scanned_files.len());
@@ -140,8 +164,8 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     let mut new_objects: u64 = 0;
 
-    // Shared dedup set: workers check before compressing to skip duplicate content
-    let seen_hashes = Arc::new(Mutex::new(staged_pack_hashes));
+    // Sharded dedup set reduces lock contention during parallel hash+compress.
+    let seen_hashes = Arc::new(ShardedSeenHashes::new(files_to_prepare.len()));
 
     // Prioritize on-disk locality to reduce random I/O during read+hash+compress.
     sort_scanned_refs_for_locality(&mut files_to_prepare);
@@ -332,7 +356,7 @@ fn cached_processed_file(
 
 fn prepare_file(
     scanned: &ScannedFile,
-    seen_hashes: &Mutex<HashSet<[u8; 32]>>,
+    seen_hashes: &ShardedSeenHashes,
     compressor: &mut zstd::bulk::Compressor<'_>,
 ) -> Result<PreparedFile> {
     // Read file with pre-allocated buffer (skip fstat overhead of fs::read)
@@ -349,10 +373,7 @@ fn prepare_file(
     let blob_hash_bytes: [u8; 32] = *hash.as_bytes();
 
     // Only compress if this hash hasn't been seen yet (use raw bytes, no hex conversion)
-    let is_new = {
-        let mut set = seen_hashes.lock().unwrap();
-        set.insert(blob_hash_bytes)
-    };
+    let is_new = seen_hashes.insert(blob_hash_bytes);
 
     let compressed = if is_new {
         Some(compress_with_worker_context(&content, compressor)?)
@@ -388,7 +409,7 @@ fn compress_with_worker_context(
 /// No channel overhead — threads run at full speed.
 fn prepare_files_batch(
     scanned_files: &[&ScannedFile],
-    seen_hashes: &Arc<Mutex<HashSet<[u8; 32]>>>,
+    seen_hashes: &Arc<ShardedSeenHashes>,
     progress: &ProgressCallback,
     progress_counter: &AtomicU64,
     total_to_process: u64,
@@ -592,6 +613,8 @@ fn register_directory_hierarchy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
@@ -645,5 +668,40 @@ mod tests {
         let decompressed = zstd::decode_all(&compressed[..]).unwrap();
 
         assert_eq!(decompressed, content);
+    }
+
+    #[test]
+    fn test_sharded_seen_hashes_dedups_single_thread() {
+        let seen = ShardedSeenHashes::new(8);
+        let hash = [7u8; 32];
+
+        assert!(seen.insert(hash));
+        assert!(!seen.insert(hash));
+    }
+
+    #[test]
+    fn test_sharded_seen_hashes_dedups_multi_thread() {
+        let seen = Arc::new(ShardedSeenHashes::new(1024));
+        let unique_inserts = Arc::new(AtomicUsize::new(0));
+        let duplicate_hash = [9u8; 32];
+
+        std::thread::scope(|scope| {
+            for i in 0..8u8 {
+                let seen = Arc::clone(&seen);
+                let unique_inserts = Arc::clone(&unique_inserts);
+                scope.spawn(move || {
+                    if seen.insert(duplicate_hash) {
+                        unique_inserts.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let mut unique_hash = [0u8; 32];
+                    unique_hash[0] = i;
+                    if seen.insert(unique_hash) {
+                        unique_inserts.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(unique_inserts.load(Ordering::Relaxed), 9);
     }
 }
