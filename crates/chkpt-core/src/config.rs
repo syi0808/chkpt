@@ -50,7 +50,7 @@ impl StoreLayout {
     }
 
     pub fn index_path(&self) -> PathBuf {
-        self.base.join("index.sqlite")
+        self.base.join("index.bin")
     }
 
     pub fn locks_dir(&self) -> PathBuf {

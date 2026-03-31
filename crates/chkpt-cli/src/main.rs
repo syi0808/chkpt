@@ -16,6 +16,9 @@ enum Commands {
         /// Optional message for the checkpoint
         #[arg(short, long)]
         message: Option<String>,
+        /// Include dependency directories (node_modules, .venv, etc.)
+        #[arg(long)]
+        include_deps: bool,
     },
     /// List all checkpoints
     List {
@@ -44,8 +47,14 @@ fn main() -> Result<()> {
     let workspace = std::env::current_dir()?;
 
     match cli.command {
-        Commands::Save { message } => {
-            let opts = chkpt_core::ops::save::SaveOptions { message };
+        Commands::Save {
+            message,
+            include_deps,
+        } => {
+            let opts = chkpt_core::ops::save::SaveOptions {
+                message,
+                include_deps,
+            };
             let result = chkpt_core::ops::save::save(&workspace, opts)?;
             println!("Checkpoint saved: {}", result.snapshot_id);
             println!(

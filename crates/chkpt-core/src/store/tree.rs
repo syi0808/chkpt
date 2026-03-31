@@ -1,15 +1,16 @@
 use crate::error::{ChkpttError, Result};
+use bitcode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
 pub enum EntryType {
     File,
     Dir,
     Symlink,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Encode, Decode)]
 pub struct TreeEntry {
     pub name: String,
     pub entry_type: EntryType,
@@ -36,7 +37,7 @@ impl TreeStore {
     pub fn write(&self, entries: &[TreeEntry]) -> Result<String> {
         let mut sorted = entries.to_vec();
         sorted.sort_by(|a, b| a.name.cmp(&b.name));
-        let encoded = bincode::serialize(&sorted)?;
+        let encoded = bitcode::encode(&sorted);
         let hash_hex = blake3::hash(&encoded).to_hex().to_string();
         let path = self.tree_path(&hash_hex);
         if path.exists() {
@@ -58,7 +59,7 @@ impl TreeStore {
             return Err(ChkpttError::ObjectNotFound(hash_hex.to_string()));
         }
         let data = std::fs::read(&path)?;
-        let entries: Vec<TreeEntry> = bincode::deserialize(&data)?;
+        let entries: Vec<TreeEntry> = bitcode::decode(&data)?;
         Ok(entries)
     }
 

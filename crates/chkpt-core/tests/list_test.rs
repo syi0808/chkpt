@@ -29,7 +29,7 @@ fn test_list_with_limit() {
     let workspace = TempDir::new().unwrap();
     fs::write(workspace.path().join("a.txt"), "data").unwrap();
     for _ in 0..5 {
-        save(workspace.path(), SaveOptions { message: None }).unwrap();
+        save(workspace.path(), SaveOptions::default()).unwrap();
     }
     let result = list(workspace.path(), Some(3)).unwrap();
     assert_eq!(result.len(), 3);

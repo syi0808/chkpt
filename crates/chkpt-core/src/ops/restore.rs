@@ -154,7 +154,7 @@ pub fn restore(
     collect_tree_files(&tree_store, &root_tree_hash_hex, "", &mut target_state)?;
 
     // 5. Scan current workspace to get current state (path -> content_hash_hex)
-    let index = FileIndex::open(layout.index_path())?;
+    let mut index = FileIndex::open(layout.index_path())?;
     let cached_entries = index.entries_by_path()?;
     let current_state = scan_current_state(workspace_root, &cached_entries)?;
 

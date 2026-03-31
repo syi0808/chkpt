@@ -9,9 +9,16 @@ use std::sync::{Arc, Mutex};
 ///
 /// If `chkptignore_override` is provided, it is used as the .chkptignore path.
 /// Otherwise, `root/.chkptignore` is checked automatically.
-pub fn walk(root: &Path, chkptignore_override: Option<&Path>) -> Result<Vec<ScannedFile>> {
+pub fn walk(
+    root: &Path,
+    chkptignore_override: Option<&Path>,
+    include_deps: bool,
+) -> Result<Vec<ScannedFile>> {
     let chkptignore_path = resolve_chkptignore_path(root, chkptignore_override);
-    let matcher = Arc::new(IgnoreMatcher::new(chkptignore_path.as_deref()));
+    let matcher = Arc::new(IgnoreMatcher::new(
+        chkptignore_path.as_deref(),
+        include_deps,
+    ));
     let mut files = Vec::new();
 
     for entry in build_walk_builder(root, matcher).build() {
@@ -39,10 +46,17 @@ pub fn walk(root: &Path, chkptignore_override: Option<&Path>) -> Result<Vec<Scan
     Ok(files)
 }
 
-pub fn walk_parallel(root: &Path, chkptignore_override: Option<&Path>) -> Result<Vec<ScannedFile>> {
+pub fn walk_parallel(
+    root: &Path,
+    chkptignore_override: Option<&Path>,
+    include_deps: bool,
+) -> Result<Vec<ScannedFile>> {
     let chkptignore_path = resolve_chkptignore_path(root, chkptignore_override);
     let root = Arc::new(root.to_path_buf());
-    let matcher = Arc::new(IgnoreMatcher::new(chkptignore_path.as_deref()));
+    let matcher = Arc::new(IgnoreMatcher::new(
+        chkptignore_path.as_deref(),
+        include_deps,
+    ));
     let files = Arc::new(Mutex::new(Vec::new()));
     let error = Arc::new(Mutex::new(None));
 

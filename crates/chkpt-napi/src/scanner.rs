@@ -14,9 +14,13 @@ pub struct JsScannedFile {
 }
 
 #[napi]
-pub async fn scan_workspace(workspace_path: String) -> napi::Result<Vec<JsScannedFile>> {
+pub async fn scan_workspace(
+    workspace_path: String,
+    include_deps: Option<bool>,
+) -> napi::Result<Vec<JsScannedFile>> {
     let path = Path::new(&workspace_path);
-    let files = scanner::scan_workspace(path, None).map_err(to_napi_error)?;
+    let files = scanner::scan_workspace_with_options(path, None, include_deps.unwrap_or(false))
+        .map_err(to_napi_error)?;
     Ok(files
         .iter()
         .map(|f| JsScannedFile {

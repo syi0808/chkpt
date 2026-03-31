@@ -18,6 +18,7 @@ fn test_e2e_save_list_restore() {
         workspace.path(),
         SaveOptions {
             message: Some("initial".into()),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -58,6 +59,7 @@ fn test_e2e_multiple_saves_selective_restore() {
         workspace.path(),
         SaveOptions {
             message: Some("v1".into()),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -68,6 +70,7 @@ fn test_e2e_multiple_saves_selective_restore() {
         workspace.path(),
         SaveOptions {
             message: Some("v2".into()),
+            ..Default::default()
         },
     )
     .unwrap();

@@ -17,9 +17,16 @@ pub struct JsSaveResult {
 }
 
 #[napi]
-pub async fn save(workspace_path: String, message: Option<String>) -> napi::Result<JsSaveResult> {
+pub async fn save(
+    workspace_path: String,
+    message: Option<String>,
+    include_deps: Option<bool>,
+) -> napi::Result<JsSaveResult> {
     let root = PathBuf::from(workspace_path);
-    let options = SaveOptions { message };
+    let options = SaveOptions {
+        message,
+        include_deps: include_deps.unwrap_or(false),
+    };
     let result = save::save(&root, options).map_err(to_napi_error)?;
     Ok(JsSaveResult {
         snapshot_id: result.snapshot_id,

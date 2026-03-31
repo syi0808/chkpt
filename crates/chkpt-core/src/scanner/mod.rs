@@ -17,7 +17,16 @@ pub struct ScannedFile {
 
 /// Scan workspace, respecting .chkptignore and built-in exclusions.
 pub fn scan_workspace(root: &Path, chkptignore: Option<&Path>) -> Result<Vec<ScannedFile>> {
-    scan_workspace_parallel(root, chkptignore)
+    scan_workspace_with_options(root, chkptignore, false)
+}
+
+/// Scan workspace with configurable options.
+pub fn scan_workspace_with_options(
+    root: &Path,
+    chkptignore: Option<&Path>,
+    include_deps: bool,
+) -> Result<Vec<ScannedFile>> {
+    walker::walk_parallel(root, chkptignore, include_deps)
 }
 
 /// Scan workspace using the parallel walker.
@@ -25,5 +34,5 @@ pub fn scan_workspace_parallel(
     root: &Path,
     chkptignore: Option<&Path>,
 ) -> Result<Vec<ScannedFile>> {
-    walker::walk_parallel(root, chkptignore)
+    walker::walk_parallel(root, chkptignore, false)
 }

@@ -122,7 +122,7 @@ fn test_parallel_walk_matches_scan_workspace() {
     fs::write(dir.path().join("skip.tmp"), "ignore me").unwrap();
 
     let standard = scan_workspace(dir.path(), None).unwrap();
-    let parallel = chkpt_core::scanner::walker::walk_parallel(dir.path(), None).unwrap();
+    let parallel = chkpt_core::scanner::walker::walk_parallel(dir.path(), None, false).unwrap();
 
     let standard_paths: Vec<_> = standard.iter().map(|f| f.relative_path.clone()).collect();
     let parallel_paths: Vec<_> = parallel.iter().map(|f| f.relative_path.clone()).collect();
@@ -139,11 +139,48 @@ fn test_parallel_scan_entrypoint_matches_sequential_walk() {
     fs::write(dir.path().join(".chkptignore"), "*.tmp\n").unwrap();
     fs::write(dir.path().join("skip.tmp"), "ignore me").unwrap();
 
-    let sequential = chkpt_core::scanner::walker::walk(dir.path(), None).unwrap();
+    let sequential = chkpt_core::scanner::walker::walk(dir.path(), None, false).unwrap();
     let parallel = chkpt_core::scanner::scan_workspace_parallel(dir.path(), None).unwrap();
 
     let sequential_paths: Vec<_> = sequential.iter().map(|f| f.relative_path.clone()).collect();
     let parallel_paths: Vec<_> = parallel.iter().map(|f| f.relative_path.clone()).collect();
 
     assert_eq!(parallel_paths, sequential_paths);
+}
+
+#[test]
+fn test_scan_includes_deps_when_flag_set() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("index.js"), "code").unwrap();
+    fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+    fs::write(dir.path().join("node_modules/pkg/index.js"), "dep").unwrap();
+    fs::create_dir_all(dir.path().join(".venv/lib")).unwrap();
+    fs::write(dir.path().join(".venv/lib/site.py"), "dep").unwrap();
+
+    let files = chkpt_core::scanner::scan_workspace_with_options(dir.path(), None, true).unwrap();
+    let paths: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+
+    assert!(paths.iter().any(|p| p.starts_with("node_modules/")));
+    assert!(paths.iter().any(|p| p.starts_with(".venv/")));
+    assert!(paths.contains(&"index.js"));
+}
+
+#[test]
+fn test_scan_still_excludes_git_and_chkpt_with_include_deps() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("a.txt"), "data").unwrap();
+    fs::create_dir_all(dir.path().join(".git")).unwrap();
+    fs::write(dir.path().join(".git/HEAD"), "ref").unwrap();
+    fs::create_dir_all(dir.path().join(".chkpt")).unwrap();
+    fs::write(dir.path().join(".chkpt/config"), "x").unwrap();
+    fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+    fs::write(dir.path().join("target/debug/app"), "bin").unwrap();
+
+    let files = chkpt_core::scanner::scan_workspace_with_options(dir.path(), None, true).unwrap();
+    let paths: Vec<&str> = files.iter().map(|f| f.relative_path.as_str()).collect();
+
+    assert!(!paths.iter().any(|p| p.starts_with(".git")));
+    assert!(!paths.iter().any(|p| p.starts_with(".chkpt")));
+    assert!(!paths.iter().any(|p| p.starts_with("target")));
+    assert!(paths.contains(&"a.txt"));
 }

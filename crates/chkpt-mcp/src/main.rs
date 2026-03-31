@@ -17,6 +17,8 @@ struct SaveParams {
     workspace_path: String,
     /// Optional message for the checkpoint
     message: Option<String>,
+    /// Include dependency directories (node_modules, .venv, etc.)
+    include_deps: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -74,6 +76,7 @@ impl ChkpttServer {
         let workspace_path = Path::new(&params.workspace_path);
         let options = chkpt_core::ops::save::SaveOptions {
             message: params.message,
+            include_deps: params.include_deps.unwrap_or(false),
         };
         match chkpt_core::ops::save::save(workspace_path, options) {
             Ok(result) => serde_json::json!({

@@ -1,11 +1,11 @@
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::path::Path;
 
-/// Built-in directories that are always excluded from scanning.
-const BUILTIN_EXCLUSIONS: &[&str] = &[
-    ".git",
-    ".chkpt",
-    "target",
+/// Directories always excluded (never overridable).
+const ALWAYS_EXCLUDED: &[&str] = &[".git", ".chkpt", "target"];
+
+/// Dependency directories excluded by default, includable via --include-deps.
+const DEPENDENCY_DIRS: &[&str] = &[
     "node_modules",
     ".venv",
     "venv",
@@ -19,6 +19,7 @@ const BUILTIN_EXCLUSIONS: &[&str] = &[
 /// Matcher that combines built-in exclusions with .chkptignore patterns.
 pub struct IgnoreMatcher {
     gitignore: Option<Gitignore>,
+    include_deps: bool,
 }
 
 impl IgnoreMatcher {
@@ -26,7 +27,7 @@ impl IgnoreMatcher {
     ///
     /// If `chkptignore_path` is provided, patterns are loaded from that file.
     /// If the file does not exist, no user patterns are loaded (only built-in exclusions apply).
-    pub fn new(chkptignore_path: Option<&Path>) -> Self {
+    pub fn new(chkptignore_path: Option<&Path>, include_deps: bool) -> Self {
         let gitignore = chkptignore_path.and_then(|path| {
             if path.exists() {
                 let mut builder = GitignoreBuilder::new(path.parent().unwrap_or(Path::new(".")));
@@ -46,7 +47,10 @@ impl IgnoreMatcher {
             }
         });
 
-        Self { gitignore }
+        Self {
+            gitignore,
+            include_deps,
+        }
     }
 
     /// Check if the given relative path should be ignored.
@@ -55,7 +59,7 @@ impl IgnoreMatcher {
     /// `is_dir` indicates whether the path is a directory.
     pub fn is_ignored(&self, relative_path: &str, is_dir: bool) -> bool {
         // Check built-in exclusions first
-        if has_excluded_directory_component(relative_path, is_dir) {
+        if has_excluded_directory_component(relative_path, is_dir, self.include_deps) {
             return true;
         }
 
@@ -71,15 +75,20 @@ impl IgnoreMatcher {
     }
 }
 
-fn has_excluded_directory_component(relative_path: &str, is_dir: bool) -> bool {
+fn has_excluded_directory_component(relative_path: &str, is_dir: bool, include_deps: bool) -> bool {
     let mut components = relative_path.split('/').peekable();
 
     while let Some(component) = components.next() {
         let is_last = components.peek().is_none();
         let is_directory_component = is_dir || !is_last;
 
-        if is_directory_component && BUILTIN_EXCLUSIONS.contains(&component) {
-            return true;
+        if is_directory_component {
+            if ALWAYS_EXCLUDED.contains(&component) {
+                return true;
+            }
+            if !include_deps && DEPENDENCY_DIRS.contains(&component) {
+                return true;
+            }
         }
     }
 
@@ -94,7 +103,7 @@ mod tests {
 
     #[test]
     fn test_builtin_exclusions() {
-        let matcher = IgnoreMatcher::new(None);
+        let matcher = IgnoreMatcher::new(None, false);
         assert!(matcher.is_ignored(".git", true));
         assert!(matcher.is_ignored(".git/HEAD", false));
         assert!(matcher.is_ignored("node_modules", true));
@@ -113,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_non_excluded_paths() {
-        let matcher = IgnoreMatcher::new(None);
+        let matcher = IgnoreMatcher::new(None, false);
         assert!(!matcher.is_ignored("src/main.rs", false));
         assert!(!matcher.is_ignored("README.md", false));
         assert!(!matcher.is_ignored(".gitignore", false));
@@ -127,7 +136,7 @@ mod tests {
         let ignore_path = dir.path().join(".chkptignore");
         fs::write(&ignore_path, "*.log\nbuild/\n").unwrap();
 
-        let matcher = IgnoreMatcher::new(Some(&ignore_path));
+        let matcher = IgnoreMatcher::new(Some(&ignore_path), false);
         assert!(matcher.is_ignored("debug.log", false));
         assert!(matcher.is_ignored("build/out.o", false));
         assert!(!matcher.is_ignored("src/main.rs", false));

@@ -2,7 +2,7 @@ use crate::config::{project_id_from_path, StoreLayout};
 use crate::error::{ChkpttError, Result};
 use crate::index::{FileEntry, FileIndex};
 use crate::ops::lock::ProjectLock;
-use crate::scanner::{scan_workspace, ScannedFile};
+use crate::scanner::ScannedFile;
 use crate::store::blob::BlobStore;
 use crate::store::pack::{PackSet, PackWriter};
 use crate::store::snapshot::{Snapshot, SnapshotAttachments, SnapshotStats, SnapshotStore};
@@ -14,6 +14,7 @@ use std::path::Path;
 #[derive(Debug, Default)]
 pub struct SaveOptions {
     pub message: Option<String>,
+    pub include_deps: bool,
 }
 
 #[derive(Debug)]
@@ -74,10 +75,11 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     let _lock = ProjectLock::acquire(&layout.locks_dir())?;
 
     // 4. Scan workspace (respect .chkptignore)
-    let scanned_files = scan_workspace(workspace_root, None)?;
+    let scanned_files =
+        crate::scanner::scan_workspace_with_options(workspace_root, None, options.include_deps)?;
 
     // 5. Open/create FileIndex
-    let index = FileIndex::open(layout.index_path())?;
+    let mut index = FileIndex::open(layout.index_path())?;
     let cached_entries = index.entries_by_path()?;
 
     // 6. Create blob store
@@ -89,7 +91,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     let pack_set = has_pack_objects
         .then(|| PackSet::open_all(&packs_dir))
         .transpose()?;
-    let mut pack_writer = PackWriter::new();
+    let mut pack_writer = PackWriter::new(&packs_dir)?;
     let mut staged_pack_hashes = HashSet::new();
 
     // 7. Process each scanned file: check index, hash, store blob
@@ -165,8 +167,8 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
             mode,
         });
     }
-    if !staged_pack_hashes.is_empty() {
-        pack_writer.finish(&packs_dir)?;
+    if !pack_writer.is_empty() {
+        pack_writer.finish()?;
     }
 
     // 8. Build tree bottom-up

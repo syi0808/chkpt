@@ -5,14 +5,11 @@ pub enum ChkpttError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("SQLite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("Bincode error: {0}")]
-    Bincode(#[from] bincode::Error),
+    #[error("Bitcode error: {0}")]
+    Bitcode(String),
 
     #[error("Snapshot not found: {0}")]
     SnapshotNotFound(String),
@@ -37,3 +34,9 @@ pub enum ChkpttError {
 }
 
 pub type Result<T> = std::result::Result<T, ChkpttError>;
+
+impl From<bitcode::Error> for ChkpttError {
+    fn from(e: bitcode::Error) -> Self {
+        ChkpttError::Bitcode(e.to_string())
+    }
+}

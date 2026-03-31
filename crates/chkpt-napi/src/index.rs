@@ -73,7 +73,7 @@ pub async fn index_lookup(db_path: String, path: String) -> napi::Result<Option<
     ts_args_type = "dbPath: string, entries: Array<{ path: string, blobHash: string, size: number, mtimeSecs: number, mtimeNanos: number, inode: number | null, mode: number }>"
 )]
 pub async fn index_upsert(db_path: String, entries: Vec<serde_json::Value>) -> napi::Result<()> {
-    let idx = FileIndex::open(&db_path).map_err(to_napi_error)?;
+    let mut idx = FileIndex::open(&db_path).map_err(to_napi_error)?;
     let core_entries: Vec<FileEntry> = entries
         .iter()
         .map(|v| {
@@ -96,7 +96,7 @@ pub async fn index_all_entries(db_path: String) -> napi::Result<Vec<JsFileEntry>
 
 #[napi]
 pub async fn index_clear(db_path: String) -> napi::Result<()> {
-    let idx = FileIndex::open(&db_path).map_err(to_napi_error)?;
+    let mut idx = FileIndex::open(&db_path).map_err(to_napi_error)?;
     idx.clear().map_err(to_napi_error)?;
     Ok(())
 }
