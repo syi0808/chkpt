@@ -1,6 +1,7 @@
 use crate::config::{project_id_from_path, StoreLayout};
 use crate::error::{ChkpttError, Result};
 use crate::index::{FileEntry, FileIndex};
+use crate::ops::io_order::sort_scanned_refs_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
 use crate::store::blob::BlobStore;
@@ -141,6 +142,9 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // Shared dedup set: workers check before compressing to skip duplicate content
     let seen_hashes = Arc::new(Mutex::new(staged_pack_hashes));
+
+    // Prioritize on-disk locality to reduce random I/O during read+hash+compress.
+    sort_scanned_refs_for_locality(&mut files_to_prepare);
 
     // Batch parallel: each thread processes a chunk independently, no channel overhead
     let total_to_process = files_to_prepare.len() as u64;

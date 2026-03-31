@@ -1,6 +1,7 @@
 use crate::config::{project_id_from_path, StoreLayout};
 use crate::error::{ChkpttError, Result};
 use crate::index::FileIndex;
+use crate::ops::io_order::sort_scanned_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
 use crate::store::blob::{hash_file, BlobStore};
@@ -335,6 +336,8 @@ fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFil
     if scanned_files.is_empty() {
         return Ok(Vec::new());
     }
+    let mut scanned_files = scanned_files;
+    sort_scanned_for_locality(&mut scanned_files);
 
     let worker_count = std::thread::available_parallelism()
         .map(|count| count.get())
