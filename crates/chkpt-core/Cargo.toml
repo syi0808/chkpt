@@ -27,3 +27,8 @@ memmap2 = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = { workspace = true }
+rustix = { workspace = true }
+
+[[bench]]
+name = "save_pipeline"
+harness = false
