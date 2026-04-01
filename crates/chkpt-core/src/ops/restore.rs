@@ -9,7 +9,7 @@ use crate::store::catalog::{ManifestEntry, MetadataCatalog};
 use crate::store::pack::{PackLocation, PackSet};
 use crate::store::snapshot::SnapshotStore;
 use crate::store::tree::{EntryType, TreeStore};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -522,8 +522,8 @@ pub fn restore(
         );
     }
 
-    // 8c. Clean up empty directories
-    cleanup_empty_dirs(workspace_root)?;
+    // 8c. Clean up empty directories affected by removed files only.
+    cleanup_removed_file_parents(workspace_root, &files_to_remove)?;
 
     let file_entries = restored_index_entries(workspace_root, &restored_paths, &target_state)?;
     index.apply_changes(&files_to_remove, &file_entries)?;
@@ -758,11 +758,6 @@ fn scanned_file_from_metadata(
     }
 }
 
-/// Recursively remove empty directories under root (but not root itself).
-fn cleanup_empty_dirs(root: &Path) -> Result<()> {
-    cleanup_empty_dirs_recursive(root, root)
-}
-
 fn blob_store_has_loose_objects(objects_dir: &Path) -> Result<bool> {
     if !objects_dir.exists() {
         return Ok(false);
@@ -784,25 +779,42 @@ fn blob_store_has_loose_objects(objects_dir: &Path) -> Result<bool> {
     Ok(false)
 }
 
-fn cleanup_empty_dirs_recursive(root: &Path, dir: &Path) -> Result<()> {
-    if !dir.is_dir() {
+fn cleanup_removed_file_parents(root: &Path, removed_paths: &[String]) -> Result<()> {
+    if removed_paths.is_empty() {
         return Ok(());
     }
 
-    // First recurse into subdirectories
-    let entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
-
-    for entry in &entries {
-        if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-            cleanup_empty_dirs_recursive(root, &entry.path())?;
+    let mut candidates = HashSet::new();
+    for removed_path in removed_paths {
+        let mut current = root.join(removed_path);
+        while let Some(parent) = current.parent() {
+            if parent == root {
+                candidates.insert(parent.to_path_buf());
+                break;
+            }
+            if !parent.starts_with(root) {
+                break;
+            }
+            candidates.insert(parent.to_path_buf());
+            current = parent.to_path_buf();
         }
     }
 
-    // After recursing, check if directory is now empty (and it's not the root)
-    if dir != root {
-        let remaining: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
-        if remaining.is_empty() {
-            std::fs::remove_dir(dir)?;
+    let mut candidates: Vec<_> = candidates.into_iter().filter(|dir| dir != root).collect();
+    candidates.sort_unstable_by(|left, right| {
+        right
+            .components()
+            .count()
+            .cmp(&left.components().count())
+            .then_with(|| left.cmp(right))
+    });
+
+    for dir in candidates {
+        match std::fs::remove_dir(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+            Err(error) => return Err(error.into()),
         }
     }
 
@@ -829,6 +841,43 @@ mod tests {
         std::fs::create_dir_all(objects_dir.join("aa")).unwrap();
         std::fs::write(objects_dir.join("aa").join("bb"), b"data").unwrap();
         assert!(blob_store_has_loose_objects(&objects_dir).unwrap());
+    }
+
+    #[test]
+    fn test_cleanup_removed_file_parents_removes_only_empty_ancestor_chain() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        let empty_leaf = root.join("a/b/c");
+        std::fs::create_dir_all(&empty_leaf).unwrap();
+        std::fs::write(empty_leaf.join("gone.txt"), b"gone").unwrap();
+        std::fs::remove_file(empty_leaf.join("gone.txt")).unwrap();
+
+        let non_empty_leaf = root.join("a/keep");
+        std::fs::create_dir_all(&non_empty_leaf).unwrap();
+        std::fs::write(non_empty_leaf.join("keep.txt"), b"keep").unwrap();
+
+        cleanup_removed_file_parents(root, &[String::from("a/b/c/gone.txt")]).unwrap();
+
+        assert!(!root.join("a/b/c").exists());
+        assert!(!root.join("a/b").exists());
+        assert!(root.join("a").exists());
+        assert!(root.join("a/keep/keep.txt").exists());
+    }
+
+    #[test]
+    fn test_cleanup_removed_file_parents_skips_non_empty_directories() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        let shared = root.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("still-here.txt"), b"keep").unwrap();
+
+        cleanup_removed_file_parents(root, &[String::from("shared/gone.txt")]).unwrap();
+
+        assert!(root.join("shared").exists());
+        assert!(root.join("shared/still-here.txt").exists());
     }
 
     #[test]
