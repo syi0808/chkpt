@@ -1,0 +1,652 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+ARTIFACT_ROOT = REPO_ROOT / ".benchmarks"
+FIXTURE_ROOT = ARTIFACT_ROOT / "fixtures"
+RUNS_ROOT = ARTIFACT_ROOT / "runs"
+HOMES_ROOT = ARTIFACT_ROOT / "homes"
+FIXTURE_VERSION = 1
+
+
+@dataclass(frozen=True)
+class FixtureSpec:
+    name: str
+    kind: str
+    files: int
+    dirs: int
+    seed: int = 42
+    modified_files: int = 0
+    small_size: int = 4096
+    large_every: int = 0
+    large_size: int = 0
+
+
+@dataclass(frozen=True)
+class Scenario:
+    name: str
+    kind: str
+    description: str
+    command: list[str]
+    fixture: str | None = None
+
+
+FIXTURES: dict[str, FixtureSpec] = {
+    "text_small": FixtureSpec(
+        name="text_small",
+        kind="text",
+        files=3000,
+        dirs=60,
+    ),
+    "text_large": FixtureSpec(
+        name="text_large",
+        kind="text",
+        files=20000,
+        dirs=400,
+    ),
+    "mixed_large": FixtureSpec(
+        name="mixed_large",
+        kind="mixed",
+        files=5000,
+        dirs=100,
+        large_every=10,
+        large_size=256 * 1024,
+    ),
+    "random_binary": FixtureSpec(
+        name="random_binary",
+        kind="random_binary",
+        files=800,
+        dirs=40,
+        large_size=128 * 1024,
+    ),
+}
+
+
+SCENARIOS: dict[str, Scenario] = {
+    "bench_ops_default": Scenario(
+        name="bench_ops_default",
+        kind="bench_ops",
+        description="End-to-end synthetic default workload (3k files, 200 modified).",
+        command=[
+            "cargo",
+            "run",
+            "--release",
+            "-q",
+            "-p",
+            "chkpt-core",
+            "--example",
+            "bench_ops",
+            "--",
+            "--iterations",
+            "5",
+        ],
+    ),
+    "bench_ops_large": Scenario(
+        name="bench_ops_large",
+        kind="bench_ops",
+        description="End-to-end larger workload (20k files, 5k modified).",
+        command=[
+            "cargo",
+            "run",
+            "--release",
+            "-q",
+            "-p",
+            "chkpt-core",
+            "--example",
+            "bench_ops",
+            "--",
+            "--files",
+            "20000",
+            "--modified-files",
+            "5000",
+            "--dirs",
+            "400",
+            "--iterations",
+            "3",
+        ],
+    ),
+    "save_pipeline_text_small": Scenario(
+        name="save_pipeline_text_small",
+        kind="save_pipeline",
+        description="Sectioned save path on 3k small-text files.",
+        command=["cargo", "bench", "-q", "-p", "chkpt-core", "--bench", "save_pipeline", "--"],
+        fixture="text_small",
+    ),
+    "save_pipeline_text_large": Scenario(
+        name="save_pipeline_text_large",
+        kind="save_pipeline",
+        description="Sectioned save path on 20k small-text files.",
+        command=["cargo", "bench", "-q", "-p", "chkpt-core", "--bench", "save_pipeline", "--"],
+        fixture="text_large",
+    ),
+    "save_pipeline_mixed_large": Scenario(
+        name="save_pipeline_mixed_large",
+        kind="save_pipeline",
+        description="Sectioned save path on mixed small/large files.",
+        command=["cargo", "bench", "-q", "-p", "chkpt-core", "--bench", "save_pipeline", "--"],
+        fixture="mixed_large",
+    ),
+    "save_pipeline_random_binary": Scenario(
+        name="save_pipeline_random_binary",
+        kind="save_pipeline",
+        description="Sectioned save path on incompressible binary files.",
+        command=["cargo", "bench", "-q", "-p", "chkpt-core", "--bench", "save_pipeline", "--"],
+        fixture="random_binary",
+    ),
+}
+
+DEFAULT_SCENARIOS = [
+    "bench_ops_default",
+    "bench_ops_large",
+    "save_pipeline_text_small",
+    "save_pipeline_text_large",
+    "save_pipeline_mixed_large",
+    "save_pipeline_random_binary",
+]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate benchmark fixtures, run the benchmark suite, and compare results."
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    subparsers.add_parser("list", help="List available fixtures and benchmark scenarios.")
+
+    fixtures_parser = subparsers.add_parser("fixtures", help="Generate reusable benchmark fixtures.")
+    fixtures_parser.add_argument(
+        "--fixture",
+        action="append",
+        dest="fixtures",
+        choices=sorted(FIXTURES.keys()),
+        help="Only generate the selected fixture. Repeat to select multiple fixtures.",
+    )
+
+    run_parser = subparsers.add_parser("run", help="Run the benchmark suite and store parsed results.")
+    run_parser.add_argument("--label", required=True, help="Human-readable label for this run.")
+    run_parser.add_argument(
+        "--scenario",
+        action="append",
+        dest="scenarios",
+        choices=sorted(SCENARIOS.keys()),
+        help="Only run the selected scenario. Repeat to select multiple scenarios.",
+    )
+    run_parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="Skip the upfront release build and use existing build artifacts.",
+    )
+
+    compare_parser = subparsers.add_parser(
+        "compare", help="Render a Markdown before/after comparison table from two benchmark runs."
+    )
+    compare_parser.add_argument("--before", required=True, help="Path to an earlier run dir or results.json.")
+    compare_parser.add_argument("--after", required=True, help="Path to a later run dir or results.json.")
+    compare_parser.add_argument("--output", help="Optional path to write the rendered Markdown report.")
+
+    return parser.parse_args()
+
+
+def sanitize_label(label: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", label.strip()).strip("-")
+    return cleaned or "run"
+
+
+def ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def deterministic_bytes(size: int, seed: int) -> bytes:
+    mask = (1 << 64) - 1
+    state = (seed ^ 0x9E3779B97F4A7C15) & mask
+    out = bytearray(size)
+    for index in range(size):
+        state ^= (state << 13) & mask
+        state ^= state >> 7
+        state ^= (state << 17) & mask
+        out[index] = state & 0xFF
+    return bytes(out)
+
+
+def write_text_file(path: Path, index: int, version: int, size: int) -> None:
+    body = "x" * (size + version * 17 + (index % 31))
+    path.write_text(f"file={index}\nversion={version}\n{body}", encoding="utf-8")
+
+
+def create_fixture(spec: FixtureSpec, root: Path) -> Path:
+    fixture_dir = root / spec.name
+    manifest_path = fixture_dir / "fixture-manifest.json"
+    manifest = {
+        "version": FIXTURE_VERSION,
+        "spec": asdict(spec),
+    }
+
+    if manifest_path.exists():
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if existing == manifest:
+            return fixture_dir
+
+    if fixture_dir.exists():
+        shutil.rmtree(fixture_dir)
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+
+    for index in range(spec.files):
+        dir_path = fixture_dir / f"dir_{index % max(spec.dirs, 1):04d}"
+        dir_path.mkdir(parents=True, exist_ok=True)
+        if spec.kind == "text":
+            write_text_file(dir_path / f"file_{index:05d}.txt", index, 0, spec.small_size)
+        elif spec.kind == "mixed":
+            if spec.large_every and index % spec.large_every == 0:
+                payload = deterministic_bytes(spec.large_size + (index % 1024), spec.seed + index)
+                (dir_path / f"file_{index:05d}.bin").write_bytes(payload)
+            else:
+                write_text_file(dir_path / f"file_{index:05d}.txt", index, 0, spec.small_size)
+        elif spec.kind == "random_binary":
+            payload = deterministic_bytes(spec.large_size, spec.seed + index)
+            (dir_path / f"file_{index:05d}.bin").write_bytes(payload)
+        else:
+            raise ValueError(f"unsupported fixture kind: {spec.kind}")
+
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    return fixture_dir
+
+
+def run_command(cmd: list[str], env: dict[str, str]) -> str:
+    completed = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=True,
+    )
+    return completed.stdout
+
+
+def parse_key_values(line: str) -> dict[str, float]:
+    pairs = dict(re.findall(r"([a-zA-Z0-9_]+)=([0-9]+(?:\.[0-9]+)?)", line))
+    return {key: float(value) for key, value in pairs.items()}
+
+
+def parse_bench_ops(output: str) -> dict[str, Any]:
+    config: dict[str, float] | None = None
+    iterations: list[dict[str, float]] = []
+    average: dict[str, float] | None = None
+
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("benchmark_config "):
+            config = parse_key_values(stripped)
+        elif stripped.startswith("iteration="):
+            iterations.append(parse_key_values(stripped))
+        elif stripped.startswith("average "):
+            average = parse_key_values(stripped)
+
+    if config is None or average is None:
+        raise ValueError("failed to parse bench_ops output")
+
+    return {
+        "config": config,
+        "iterations": iterations,
+        "average": average,
+    }
+
+
+def parse_save_pipeline(output: str) -> dict[str, Any]:
+    phases: dict[str, int] = {}
+    index_breakdown: dict[str, int] = {}
+    variants: dict[str, int] = {}
+    metadata: dict[str, int] = {}
+
+    phase_patterns = {
+        "scan_ms": re.compile(r"^\[scan\]\s+(?P<ms>\d+)ms"),
+        "index_total_ms": re.compile(
+            r"^\[index\]\s+(?P<ms>\d+)ms\s+\(load: (?P<load>\d+)ms, check: (?P<check>\d+)ms, cached: (?P<cached>\d+), new: (?P<new>\d+)\)"
+        ),
+        "read_hash_compress_ms": re.compile(
+            r"^\[read\+hash\+compress\]\s+(?P<ms>\d+)ms\s+\(unique: (?P<unique>\d+), dup: (?P<dup>\d+)\)"
+        ),
+        "pack_write_ms": re.compile(r"^\[pack_write\]\s+(?P<ms>\d+)ms"),
+        "build_tree_ms": re.compile(r"^\[build_tree\]\s+(?P<ms>\d+)ms\s+\((?P<dirs>\d+) dirs\)"),
+        "index_flush_ms": re.compile(r"^\[index_flush\]\s+(?P<ms>\d+)ms"),
+        "dir_fd_cache_ms": re.compile(r"^dir FD cache build: (?P<ms>\d+)ms \((?P<dirs>\d+) dirs\)"),
+        "best_threads": re.compile(r"^>> best: (?P<threads>\d+) threads \((?P<ms>\d+)ms\)"),
+    }
+    variant_pattern = re.compile(r"^(?P<label>.+?)\s+(?P<ms>\d+)ms\s+\((?P<threads>\d+) threads\)$")
+
+    label_map = {
+        "baseline (std::fs, path order)": "baseline_read_hash_ms",
+        "inode-sorted": "inode_sorted_read_hash_ms",
+        "openat + inode-sorted": "openat_read_hash_ms",
+        "mmap hybrid + inode-sorted": "mmap_hybrid_read_hash_ms",
+        "ALL COMBINED": "combined_read_hash_ms",
+    }
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        matched = False
+        for key, pattern in phase_patterns.items():
+            match = pattern.match(line)
+            if not match:
+                continue
+            groups = {name: int(value) for name, value in match.groupdict().items()}
+            matched = True
+            if key == "index_total_ms":
+                phases[key] = groups["ms"]
+                index_breakdown = {
+                    "load_ms": groups["load"],
+                    "check_ms": groups["check"],
+                    "cached": groups["cached"],
+                    "new": groups["new"],
+                }
+            elif key == "read_hash_compress_ms":
+                phases[key] = groups["ms"]
+                metadata["unique_objects"] = groups["unique"]
+                metadata["duplicate_objects"] = groups["dup"]
+            elif key == "build_tree_ms":
+                phases[key] = groups["ms"]
+                metadata["tree_dirs"] = groups["dirs"]
+            elif key == "dir_fd_cache_ms":
+                variants[key] = groups["ms"]
+                metadata["dir_fd_dirs"] = groups["dirs"]
+            elif key == "best_threads":
+                variants["best_thread_count"] = groups["threads"]
+                variants["best_threads_read_hash_ms"] = groups["ms"]
+            else:
+                phases[key] = groups["ms"]
+            break
+        if matched:
+            continue
+
+        variant_match = variant_pattern.match(line)
+        if variant_match:
+            label = variant_match.group("label").strip()
+            metric_key = label_map.get(label)
+            if metric_key:
+                variants[metric_key] = int(variant_match.group("ms"))
+                if metric_key == "baseline_read_hash_ms":
+                    variants["baseline_thread_count"] = int(variant_match.group("threads"))
+
+    required = [
+        "scan_ms",
+        "index_total_ms",
+        "read_hash_compress_ms",
+        "pack_write_ms",
+        "build_tree_ms",
+        "index_flush_ms",
+    ]
+    missing = [key for key in required if key not in phases]
+    if missing:
+        raise ValueError(f"failed to parse save_pipeline output: missing {missing}")
+
+    return {
+        "phases": phases,
+        "index_breakdown": index_breakdown,
+        "variants": variants,
+        "metadata": metadata,
+    }
+
+
+def git_info() -> dict[str, str]:
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return {"commit": commit, "branch": branch}
+
+
+def load_result(path_str: str) -> dict[str, Any]:
+    path = Path(path_str)
+    if path.is_dir():
+        path = path / "results.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def render_metric_table(rows: list[tuple[str, float, float]]) -> str:
+    lines = ["| Metric | Before | After | Delta |", "|---|---:|---:|---:|"]
+    for label, before, after in rows:
+        delta = after - before
+        pct = 0.0 if before == 0 else delta / before * 100.0
+        lines.append(f"| {label} | {before:.2f} | {after:.2f} | {delta:+.2f} ({pct:+.2f}%) |")
+    return "\n".join(lines)
+
+
+def compare_runs(before: dict[str, Any], after: dict[str, Any]) -> str:
+    before_scenarios = {entry["name"]: entry for entry in before["results"]}
+    after_scenarios = {entry["name"]: entry for entry in after["results"]}
+    shared = [name for name in before_scenarios if name in after_scenarios]
+
+    lines = [
+        f"# Benchmark Comparison: {before['label']} -> {after['label']}",
+        "",
+        f"- Before: `{before['git']['commit'][:12]}` on `{before['git']['branch']}`",
+        f"- After: `{after['git']['commit'][:12]}` on `{after['git']['branch']}`",
+        f"- Generated at: `{datetime.now(timezone.utc).isoformat()}`",
+        "",
+    ]
+
+    for name in shared:
+        left = before_scenarios[name]
+        right = after_scenarios[name]
+        lines.append(f"## {name}")
+        lines.append("")
+        lines.append(left["description"])
+        lines.append("")
+        if left["kind"] == "bench_ops":
+            order = [
+                ("cold_save_ms", "cold_save_ms"),
+                ("warm_save_ms", "warm_save_ms"),
+                ("incremental_save_ms", "incremental_save_ms"),
+                ("restore_dry_run_ms", "restore_dry_run_ms"),
+                ("restore_apply_ms", "restore_apply_ms"),
+            ]
+            rows = [
+                (
+                    label,
+                    float(left["parsed"]["average"][key]),
+                    float(right["parsed"]["average"][key]),
+                )
+                for key, label in order
+            ]
+            lines.append(render_metric_table(rows))
+        else:
+            variant_order = [
+                ("scan_ms", "scan_ms"),
+                ("index_total_ms", "index_total_ms"),
+                ("baseline_read_hash_ms", "baseline_read_hash_ms"),
+                ("inode_sorted_read_hash_ms", "inode_sorted_read_hash_ms"),
+                ("best_threads_read_hash_ms", "best_threads_read_hash_ms"),
+                ("openat_read_hash_ms", "openat_read_hash_ms"),
+                ("mmap_hybrid_read_hash_ms", "mmap_hybrid_read_hash_ms"),
+                ("combined_read_hash_ms", "combined_read_hash_ms"),
+                ("read_hash_compress_ms", "read_hash_compress_ms"),
+                ("pack_write_ms", "pack_write_ms"),
+                ("build_tree_ms", "build_tree_ms"),
+                ("index_flush_ms", "index_flush_ms"),
+            ]
+            rows = []
+            for key, label in variant_order:
+                before_value = left["parsed"]["phases"].get(key)
+                after_value = right["parsed"]["phases"].get(key)
+                if before_value is None:
+                    before_value = left["parsed"]["variants"].get(key)
+                if after_value is None:
+                    after_value = right["parsed"]["variants"].get(key)
+                if before_value is None or after_value is None:
+                    continue
+                rows.append((label, float(before_value), float(after_value)))
+            lines.append(render_metric_table(rows))
+            before_best = left["parsed"]["variants"].get("best_thread_count")
+            after_best = right["parsed"]["variants"].get("best_thread_count")
+            if before_best is not None or after_best is not None:
+                lines.append("")
+                lines.append(
+                    f"Best thread count: before `{before_best}` -> after `{after_best}`"
+                )
+        lines.append("")
+
+    missing_after = sorted(set(before_scenarios) - set(after_scenarios))
+    missing_before = sorted(set(after_scenarios) - set(before_scenarios))
+    if missing_after or missing_before:
+        lines.append("## Scenario Coverage")
+        lines.append("")
+        if missing_after:
+            lines.append(f"- Missing in after: {', '.join(missing_after)}")
+        if missing_before:
+            lines.append(f"- Missing in before: {', '.join(missing_before)}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def generate_selected_fixtures(names: list[str]) -> dict[str, str]:
+    ensure_dir(FIXTURE_ROOT)
+    created: dict[str, str] = {}
+    for name in names:
+        fixture_dir = create_fixture(FIXTURES[name], FIXTURE_ROOT)
+        created[name] = str(fixture_dir)
+    return created
+
+
+def scenario_names_from_args(values: list[str] | None, known: list[str]) -> list[str]:
+    return values if values else known
+
+
+def cmd_list() -> int:
+    print("Fixtures:")
+    for name, spec in FIXTURES.items():
+        print(f"  {name}: {spec.kind} ({spec.files} files, {spec.dirs} dirs)")
+    print()
+    print("Scenarios:")
+    for name, scenario in SCENARIOS.items():
+        fixture = f" fixture={scenario.fixture}" if scenario.fixture else ""
+        print(f"  {name}: {scenario.kind}{fixture} - {scenario.description}")
+    return 0
+
+
+def cmd_fixtures(args: argparse.Namespace) -> int:
+    selected = scenario_names_from_args(args.fixtures, sorted(FIXTURES.keys()))
+    created = generate_selected_fixtures(selected)
+    for name in selected:
+        print(f"{name}: {created[name]}")
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    selected = scenario_names_from_args(args.scenarios, DEFAULT_SCENARIOS)
+    needed_fixtures = sorted(
+        {SCENARIOS[name].fixture for name in selected if SCENARIOS[name].fixture is not None}
+    )
+    fixture_paths = generate_selected_fixtures([name for name in needed_fixtures if name is not None])
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = RUNS_ROOT / f"{timestamp}-{sanitize_label(args.label)}"
+    raw_dir = run_dir / "raw"
+    ensure_dir(raw_dir)
+    ensure_dir(HOMES_ROOT)
+
+    benchmark_home = HOMES_ROOT / f"{timestamp}-{sanitize_label(args.label)}"
+    ensure_dir(benchmark_home)
+
+    env = os.environ.copy()
+    env["CARGO_TERM_COLOR"] = "never"
+    env["CHKPT_HOME"] = str(benchmark_home)
+
+    if not args.skip_build:
+        print("Building release benchmark artifacts...")
+        build_output = run_command(
+            ["cargo", "build", "--release", "-p", "chkpt-core", "--example", "bench_ops", "--bench", "save_pipeline"],
+            env,
+        )
+        (raw_dir / "_build.txt").write_text(build_output, encoding="utf-8")
+
+    results: list[dict[str, Any]] = []
+    for name in selected:
+        scenario = SCENARIOS[name]
+        command = list(scenario.command)
+        if scenario.fixture:
+            command.append(fixture_paths[scenario.fixture])
+        print(f"Running {name}...")
+        output = run_command(command, env)
+        (raw_dir / f"{name}.txt").write_text(output, encoding="utf-8")
+        parsed = parse_bench_ops(output) if scenario.kind == "bench_ops" else parse_save_pipeline(output)
+        results.append(
+            {
+                "name": name,
+                "kind": scenario.kind,
+                "description": scenario.description,
+                "command": command,
+                "fixture": fixture_paths.get(scenario.fixture) if scenario.fixture else None,
+                "parsed": parsed,
+            }
+        )
+
+    payload = {
+        "label": args.label,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "git": git_info(),
+        "benchmark_home": str(benchmark_home),
+        "results": results,
+    }
+    ensure_dir(run_dir)
+    results_path = run_dir / "results.json"
+    results_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    print(results_path)
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    before = load_result(args.before)
+    after = load_result(args.after)
+    rendered = compare_runs(before, after)
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(rendered, encoding="utf-8")
+    sys.stdout.write(rendered)
+    return 0
+
+
+def main() -> int:
+    args = parse_args()
+    if args.command == "list":
+        return cmd_list()
+    if args.command == "fixtures":
+        return cmd_fixtures(args)
+    if args.command == "run":
+        return cmd_run(args)
+    if args.command == "compare":
+        return cmd_compare(args)
+    raise AssertionError(f"unhandled command: {args.command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

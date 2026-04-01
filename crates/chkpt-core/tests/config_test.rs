@@ -20,7 +20,7 @@ fn test_project_id_different_paths() {
 
 #[test]
 fn test_store_layout_paths() {
-    let layout = StoreLayout::new("abcdef1234567890");
+    let layout = StoreLayout::from_home_dir("/tmp/chkpt-home", "abcdef1234567890");
     let base = layout.base_dir();
     assert!(base.ends_with("abcdef1234567890"));
     assert!(layout.snapshots_dir().ends_with("snapshots"));
@@ -32,7 +32,7 @@ fn test_store_layout_paths() {
 
 #[test]
 fn test_store_layout_object_path_has_prefix_dir() {
-    let layout = StoreLayout::new("abcdef1234567890");
+    let layout = StoreLayout::from_home_dir("/tmp/chkpt-home", "abcdef1234567890");
     let hash_hex = "a3b4c5d6e7f8901234567890abcdef1234567890abcdef1234567890abcdef12";
     let path = layout.object_path(hash_hex);
     // Should be objects/a3/b4c5d6...

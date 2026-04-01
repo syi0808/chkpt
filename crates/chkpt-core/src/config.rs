@@ -17,8 +17,16 @@ pub struct StoreLayout {
 
 impl StoreLayout {
     pub fn new(project_id: &str) -> Self {
-        let base = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
+        let home_dir = std::env::var_os("CHKPT_HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self::from_home_dir(home_dir, project_id)
+    }
+
+    pub fn from_home_dir<P: AsRef<Path>>(home_dir: P, project_id: &str) -> Self {
+        let base = home_dir
+            .as_ref()
             .join(".chkpt")
             .join("stores")
             .join(project_id);
