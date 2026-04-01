@@ -88,6 +88,72 @@ FIXTURES: dict[str, FixtureSpec] = {
 
 
 SCENARIOS: dict[str, Scenario] = {
+    "bench_catalog_default": Scenario(
+        name="bench_catalog_default",
+        kind="bench_catalog",
+        description="SQLite catalog metadata workload with a 3k-entry manifest and 64 seeded snapshots.",
+        command=[
+            "cargo",
+            "run",
+            "--release",
+            "-q",
+            "-p",
+            "chkpt-core",
+            "--example",
+            "bench_catalog",
+            "--",
+            "--iterations",
+            "5",
+        ],
+    ),
+    "bench_catalog_large": Scenario(
+        name="bench_catalog_large",
+        kind="bench_catalog",
+        description="SQLite catalog metadata workload with a 20k-entry manifest and 256 seeded snapshots.",
+        command=[
+            "cargo",
+            "run",
+            "--release",
+            "-q",
+            "-p",
+            "chkpt-core",
+            "--example",
+            "bench_catalog",
+            "--",
+            "--manifest-entries",
+            "20000",
+            "--blob-count",
+            "20000",
+            "--seeded-snapshots",
+            "256",
+            "--iterations",
+            "3",
+        ],
+    ),
+    "bench_catalog_node_modules": Scenario(
+        name="bench_catalog_node_modules",
+        kind="bench_catalog",
+        description="SQLite catalog metadata workload with an 80k-entry node_modules-like manifest and 256 seeded snapshots.",
+        command=[
+            "cargo",
+            "run",
+            "--release",
+            "-q",
+            "-p",
+            "chkpt-core",
+            "--example",
+            "bench_catalog",
+            "--",
+            "--manifest-entries",
+            "80000",
+            "--blob-count",
+            "45000",
+            "--seeded-snapshots",
+            "256",
+            "--iterations",
+            "2",
+        ],
+    ),
     "bench_ops_default": Scenario(
         name="bench_ops_default",
         kind="bench_ops",
@@ -223,6 +289,8 @@ SCENARIOS: dict[str, Scenario] = {
 }
 
 DEFAULT_SCENARIOS = [
+    "bench_catalog_default",
+    "bench_catalog_large",
     "bench_ops_default",
     "bench_ops_large",
     "save_pipeline_text_small",
@@ -451,6 +519,35 @@ def parse_bench_ops(output: str) -> dict[str, Any]:
     }
 
 
+def parse_bench_catalog(output: str) -> dict[str, Any]:
+    config: dict[str, float] | None = None
+    iterations: list[dict[str, float]] = []
+    average: dict[str, float] | None = None
+    resources: dict[str, float] = {}
+
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("benchmark_config "):
+            config = parse_key_values(stripped)
+        elif stripped.startswith("iteration="):
+            iterations.append(parse_key_values(stripped))
+        elif stripped.startswith("average "):
+            average = parse_key_values(stripped)
+
+    if config is None or average is None:
+        raise ValueError("failed to parse bench_catalog output")
+
+    if "peak_rss_kb" in average:
+        resources["peak_rss_kb"] = average["peak_rss_kb"]
+
+    return {
+        "config": config,
+        "iterations": iterations,
+        "average": average,
+        "resources": resources,
+    }
+
+
 def parse_save_pipeline(output: str) -> dict[str, Any]:
     phases: dict[str, int] = {}
     index_breakdown: dict[str, int] = {}
@@ -614,14 +711,26 @@ def compare_runs(before: dict[str, Any], after: dict[str, Any]) -> str:
         lines.append("")
         lines.append(left["description"])
         lines.append("")
-        if left["kind"] == "bench_ops":
-            order = [
-                ("cold_save_ms", "cold_save_ms"),
-                ("warm_save_ms", "warm_save_ms"),
-                ("incremental_save_ms", "incremental_save_ms"),
-                ("restore_dry_run_ms", "restore_dry_run_ms"),
-                ("restore_apply_ms", "restore_apply_ms"),
-            ]
+        if left["kind"] in {"bench_ops", "bench_catalog"}:
+            if left["kind"] == "bench_ops":
+                order = [
+                    ("cold_save_ms", "cold_save_ms"),
+                    ("warm_save_ms", "warm_save_ms"),
+                    ("incremental_save_ms", "incremental_save_ms"),
+                    ("restore_dry_run_ms", "restore_dry_run_ms"),
+                    ("restore_apply_ms", "restore_apply_ms"),
+                ]
+            else:
+                order = [
+                    ("open_ms", "open_ms"),
+                    ("bulk_upsert_ms", "bulk_upsert_ms"),
+                    ("insert_snapshot_ms", "insert_snapshot_ms"),
+                    ("latest_snapshot_ms", "latest_snapshot_ms"),
+                    ("resolve_prefix_ms", "resolve_prefix_ms"),
+                    ("list_snapshots_ms", "list_snapshots_ms"),
+                    ("snapshot_manifest_ms", "snapshot_manifest_ms"),
+                    ("blob_lookup_ms", "blob_lookup_ms"),
+                ]
             rows = [
                 (
                     label,
@@ -745,7 +854,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not args.skip_build:
         print("Building release benchmark artifacts...")
         build_output = run_command(
-            ["cargo", "build", "--release", "-p", "chkpt-core", "--example", "bench_ops", "--bench", "save_pipeline"],
+            [
+                "cargo",
+                "build",
+                "--release",
+                "-p",
+                "chkpt-core",
+                "--example",
+                "bench_ops",
+                "--example",
+                "bench_catalog",
+                "--bench",
+                "save_pipeline",
+            ],
             env,
         )
         (raw_dir / "_build.txt").write_text(build_output, encoding="utf-8")
@@ -759,7 +880,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"Running {name}...")
         output = run_command(command, env)
         (raw_dir / f"{name}.txt").write_text(output, encoding="utf-8")
-        parsed = parse_bench_ops(output) if scenario.kind == "bench_ops" else parse_save_pipeline(output)
+        if scenario.kind == "bench_ops":
+            parsed = parse_bench_ops(output)
+        elif scenario.kind == "bench_catalog":
+            parsed = parse_bench_catalog(output)
+        else:
+            parsed = parse_save_pipeline(output)
         results.append(
             {
                 "name": name,

@@ -441,7 +441,7 @@ pub fn restore(
 
     // 5. Scan current workspace to get current state (path -> content_hash_hex)
     let mut index = FileIndex::open(layout.index_path())?;
-    let cached_entries = index.entries_by_path()?;
+    let cached_entries = index.entries();
     let current_state = scan_current_state(workspace_root, &cached_entries, target_includes_deps)?;
     emit(
         &options.progress,

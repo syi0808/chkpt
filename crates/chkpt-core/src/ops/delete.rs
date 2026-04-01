@@ -3,6 +3,7 @@ use crate::error::Result;
 use crate::ops::lock::ProjectLock;
 use crate::store::blob::BlobStore;
 use crate::store::catalog::MetadataCatalog;
+use crate::store::snapshot::SnapshotStore;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -20,6 +21,7 @@ pub fn delete(workspace_root: &Path, snapshot_id: &str) -> Result<()> {
     let catalog = MetadataCatalog::open(layout.catalog_path())?;
     catalog.load_snapshot(snapshot_id)?;
     catalog.delete_snapshot(snapshot_id)?;
+    SnapshotStore::new(layout.snapshots_dir()).delete(snapshot_id)?;
 
     let blob_store = BlobStore::new(layout.objects_dir());
     let mut touched_packs = HashSet::new();

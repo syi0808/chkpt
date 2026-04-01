@@ -124,3 +124,64 @@ fn test_snapshot_latest() {
     let latest = store.latest().unwrap().unwrap();
     assert_eq!(latest.id, id2);
 }
+
+#[test]
+fn test_snapshot_latest_falls_back_when_pointer_is_stale() {
+    let dir = TempDir::new().unwrap();
+    let store = SnapshotStore::new(dir.path().to_path_buf());
+    let snap = Snapshot::new(
+        Some("only".into()),
+        [7u8; 32],
+        None,
+        SnapshotAttachments::default(),
+        SnapshotStats {
+            total_files: 0,
+            total_bytes: 0,
+            new_objects: 0,
+        },
+    );
+    let id = snap.id.clone();
+    store.save(&snap).unwrap();
+    std::fs::write(dir.path().join(".latest"), "missing-snapshot").unwrap();
+
+    let latest = store.latest().unwrap().unwrap();
+    assert_eq!(latest.id, id);
+}
+
+#[test]
+fn test_snapshot_delete_clears_latest_pointer() {
+    let dir = TempDir::new().unwrap();
+    let store = SnapshotStore::new(dir.path().to_path_buf());
+    let snap1 = Snapshot::new(
+        Some("first".into()),
+        [1u8; 32],
+        None,
+        SnapshotAttachments::default(),
+        SnapshotStats {
+            total_files: 0,
+            total_bytes: 0,
+            new_objects: 0,
+        },
+    );
+    store.save(&snap1).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let snap2 = Snapshot::new(
+        Some("second".into()),
+        [2u8; 32],
+        None,
+        SnapshotAttachments::default(),
+        SnapshotStats {
+            total_files: 0,
+            total_bytes: 0,
+            new_objects: 0,
+        },
+    );
+    let id1 = snap1.id.clone();
+    let id2 = snap2.id.clone();
+    store.save(&snap2).unwrap();
+
+    store.delete(&id2).unwrap();
+
+    let latest = store.latest().unwrap().unwrap();
+    assert_eq!(latest.id, id1);
+}

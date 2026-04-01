@@ -138,7 +138,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // 5. Open/create FileIndex
     let mut index = FileIndex::open(layout.index_path())?;
-    let cached_entries = index.entries_by_path()?;
+    let cached_entries = index.entries();
 
     // 6. Create blob store
     let objects_dir = layout.objects_dir();

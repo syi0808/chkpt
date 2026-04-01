@@ -61,6 +61,27 @@ impl SnapshotStore {
         self.dir.join(format!("{}.json", id))
     }
 
+    fn latest_path(&self) -> PathBuf {
+        self.dir.join(".latest")
+    }
+
+    fn write_latest_id(&self, snapshot_id: &str) -> Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        let latest_path = self.latest_path();
+        let latest_tmp = latest_path.with_extension("tmp");
+        std::fs::write(&latest_tmp, snapshot_id)?;
+        std::fs::rename(&latest_tmp, &latest_path)?;
+        Ok(())
+    }
+
+    fn clear_latest_id(&self) -> Result<()> {
+        let latest_path = self.latest_path();
+        if latest_path.exists() {
+            std::fs::remove_file(latest_path)?;
+        }
+        Ok(())
+    }
+
     pub fn save(&self, snapshot: &Snapshot) -> Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         let path = self.snapshot_path(&snapshot.id);
@@ -68,6 +89,7 @@ impl SnapshotStore {
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, &json)?;
         std::fs::rename(&tmp, &path)?;
+        self.write_latest_id(&snapshot.id)?;
         Ok(())
     }
 
@@ -84,6 +106,13 @@ impl SnapshotStore {
         let path = self.snapshot_path(id);
         if path.exists() {
             std::fs::remove_file(&path)?;
+        }
+        let latest_path = self.latest_path();
+        if latest_path.exists() {
+            let latest_id = std::fs::read_to_string(&latest_path)?;
+            if latest_id.trim() == id {
+                self.clear_latest_id()?;
+            }
         }
         Ok(())
     }
@@ -111,8 +140,28 @@ impl SnapshotStore {
     }
 
     pub fn latest(&self) -> Result<Option<Snapshot>> {
-        let list = self.list(Some(1))?;
-        Ok(list.into_iter().next())
+        let latest_path = self.latest_path();
+        if latest_path.exists() {
+            let snapshot_id = std::fs::read_to_string(&latest_path)?;
+            let snapshot_id = snapshot_id.trim();
+            if !snapshot_id.is_empty() {
+                if let Ok(snapshot) = self.load(snapshot_id) {
+                    return Ok(Some(snapshot));
+                }
+            }
+        }
+
+        let latest = self.list(Some(1))?.into_iter().next();
+        match latest {
+            Some(snapshot) => {
+                self.write_latest_id(&snapshot.id)?;
+                Ok(Some(snapshot))
+            }
+            None => {
+                self.clear_latest_id()?;
+                Ok(None)
+            }
+        }
     }
 
     /// Return all snapshot IDs.

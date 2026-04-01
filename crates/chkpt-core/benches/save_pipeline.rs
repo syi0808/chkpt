@@ -166,7 +166,7 @@ fn main() {
     let layout = StoreLayout::new(&project_id);
     let t = Instant::now();
     let index = FileIndex::open(layout.index_path()).unwrap();
-    let cached_entries = index.entries_by_path().unwrap();
+    let cached_entries = index.entries();
     let index_load_ms = t.elapsed().as_millis();
 
     let t = Instant::now();

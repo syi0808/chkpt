@@ -91,6 +91,10 @@ impl FileIndex {
         Ok(self.entries.values().cloned().collect())
     }
 
+    pub fn entries(&self) -> &HashMap<String, FileEntry> {
+        &self.entries
+    }
+
     pub fn entries_by_path(&self) -> Result<HashMap<String, FileEntry>> {
         Ok(self.entries.clone())
     }
