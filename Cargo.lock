@@ -227,6 +227,7 @@ dependencies = [
  "dirs",
  "fs4",
  "ignore",
+ "libc",
  "memmap2",
  "rustix 0.38.44",
  "serde",

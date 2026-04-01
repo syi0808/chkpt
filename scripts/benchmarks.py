@@ -285,6 +285,7 @@ def parse_bench_ops(output: str) -> dict[str, Any]:
     config: dict[str, float] | None = None
     iterations: list[dict[str, float]] = []
     average: dict[str, float] | None = None
+    resources: dict[str, float] = {}
 
     for line in output.splitlines():
         stripped = line.strip()
@@ -298,10 +299,14 @@ def parse_bench_ops(output: str) -> dict[str, Any]:
     if config is None or average is None:
         raise ValueError("failed to parse bench_ops output")
 
+    if "peak_rss_kb" in average:
+        resources["peak_rss_kb"] = average["peak_rss_kb"]
+
     return {
         "config": config,
         "iterations": iterations,
         "average": average,
+        "resources": resources,
     }
 
 
@@ -310,6 +315,7 @@ def parse_save_pipeline(output: str) -> dict[str, Any]:
     index_breakdown: dict[str, int] = {}
     variants: dict[str, int] = {}
     metadata: dict[str, int] = {}
+    resources: dict[str, int] = {}
 
     phase_patterns = {
         "scan_ms": re.compile(r"^\[scan\]\s+(?P<ms>\d+)ms"),
@@ -326,6 +332,7 @@ def parse_save_pipeline(output: str) -> dict[str, Any]:
         "best_threads": re.compile(r"^>> best: (?P<threads>\d+) threads \((?P<ms>\d+)ms\)"),
     }
     variant_pattern = re.compile(r"^(?P<label>.+?)\s+(?P<ms>\d+)ms\s+\((?P<threads>\d+) threads\)$")
+    resource_pattern = re.compile(r"^peak_rss_kb=(?P<kb>\d+)$")
 
     label_map = {
         "baseline (std::fs, path order)": "baseline_read_hash_ms",
@@ -374,6 +381,11 @@ def parse_save_pipeline(output: str) -> dict[str, Any]:
         if matched:
             continue
 
+        resource_match = resource_pattern.match(line)
+        if resource_match:
+            resources["peak_rss_kb"] = int(resource_match.group("kb"))
+            continue
+
         variant_match = variant_pattern.match(line)
         if variant_match:
             label = variant_match.group("label").strip()
@@ -400,6 +412,7 @@ def parse_save_pipeline(output: str) -> dict[str, Any]:
         "index_breakdown": index_breakdown,
         "variants": variants,
         "metadata": metadata,
+        "resources": resources,
     }
 
 
@@ -476,6 +489,10 @@ def compare_runs(before: dict[str, Any], after: dict[str, Any]) -> str:
                 )
                 for key, label in order
             ]
+            left_rss = left["parsed"].get("resources", {}).get("peak_rss_kb")
+            right_rss = right["parsed"].get("resources", {}).get("peak_rss_kb")
+            if left_rss is not None and right_rss is not None:
+                rows.append(("peak_rss_mib", float(left_rss) / 1024.0, float(right_rss) / 1024.0))
             lines.append(render_metric_table(rows))
         else:
             variant_order = [
@@ -503,6 +520,10 @@ def compare_runs(before: dict[str, Any], after: dict[str, Any]) -> str:
                 if before_value is None or after_value is None:
                     continue
                 rows.append((label, float(before_value), float(after_value)))
+            left_rss = left["parsed"].get("resources", {}).get("peak_rss_kb")
+            right_rss = right["parsed"].get("resources", {}).get("peak_rss_kb")
+            if left_rss is not None and right_rss is not None:
+                rows.append(("peak_rss_mib", float(left_rss) / 1024.0, float(right_rss) / 1024.0))
             lines.append(render_metric_table(rows))
             before_best = left["parsed"]["variants"].get("best_thread_count")
             after_best = right["parsed"]["variants"].get("best_thread_count")

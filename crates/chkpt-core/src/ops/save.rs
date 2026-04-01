@@ -11,7 +11,7 @@ use crate::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 use crate::ops::progress::{emit, ProgressCallback, ProgressEvent};
 
@@ -66,6 +66,7 @@ struct PreparedFile {
 }
 
 const SEEN_HASH_SHARDS: usize = 64;
+const PREPARED_FILE_PIPELINE_SLOTS: usize = 64;
 
 struct ShardedSeenHashes {
     shards: Vec<Mutex<HashSet<[u8; 32]>>>,
@@ -179,55 +180,55 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         },
     );
     let progress_counter = AtomicU64::new(0);
-    let prepared_results = prepare_files_batch(
+    process_prepared_files_streaming(
         &files_to_prepare,
         &seen_hashes,
         &options.progress,
         &progress_counter,
         total_to_process,
-    )?;
+        |prepared| {
+            let PreparedFile {
+                relative_path,
+                blob_hash_hex,
+                blob_hash_bytes,
+                compressed,
+                size,
+                mode,
+                mtime_secs,
+                mtime_nanos,
+                inode,
+            } = prepared;
 
-    for prepared in prepared_results {
-        let PreparedFile {
-            relative_path,
-            blob_hash_hex,
-            blob_hash_bytes,
-            compressed,
-            size,
-            mode,
-            mtime_secs,
-            mtime_nanos,
-            inode,
-        } = prepared;
-
-        total_bytes += size;
-        if let Some(compressed) = compressed {
-            let exists_externally = (has_loose_objects && blob_store.exists(&blob_hash_hex))
-                || pack_set
-                    .as_ref()
-                    .is_some_and(|ps| ps.contains(&blob_hash_hex));
-            if !exists_externally {
-                pack_writer.add_pre_compressed(blob_hash_hex, compressed)?;
-                new_objects += 1;
+            total_bytes += size;
+            if let Some(compressed) = compressed {
+                let exists_externally = (has_loose_objects && blob_store.exists(&blob_hash_hex))
+                    || pack_set
+                        .as_ref()
+                        .is_some_and(|ps| ps.contains(&blob_hash_hex));
+                if !exists_externally {
+                    pack_writer.add_pre_compressed(blob_hash_hex, compressed)?;
+                    new_objects += 1;
+                }
             }
-        }
 
-        updated_entries.push(FileEntry {
-            path: relative_path.clone(),
-            blob_hash: blob_hash_bytes,
-            size,
-            mtime_secs,
-            mtime_nanos,
-            inode,
-            mode,
-        });
-        processed_files.push(ProcessedFile {
-            relative_path,
-            blob_hash_bytes,
-            size,
-            mode,
-        });
-    }
+            updated_entries.push(FileEntry {
+                path: relative_path.clone(),
+                blob_hash: blob_hash_bytes,
+                size,
+                mtime_secs,
+                mtime_nanos,
+                inode,
+                mode,
+            });
+            processed_files.push(ProcessedFile {
+                relative_path,
+                blob_hash_bytes,
+                size,
+                mode,
+            });
+            Ok(())
+        },
+    )?;
     if !pack_writer.is_empty() {
         pack_writer.finish()?;
     }
@@ -404,18 +405,21 @@ fn compress_with_worker_context(
     Ok(compressor.compress(content)?)
 }
 
-/// Prepare files in parallel batches.
-/// Each thread processes a chunk independently and collects results in a local Vec.
-/// No channel overhead — threads run at full speed.
-fn prepare_files_batch(
+/// Prepare files with a bounded producer/consumer pipeline so compressed blobs
+/// can be consumed immediately instead of accumulating for the full save.
+fn process_prepared_files_streaming<F>(
     scanned_files: &[&ScannedFile],
     seen_hashes: &Arc<ShardedSeenHashes>,
     progress: &ProgressCallback,
     progress_counter: &AtomicU64,
     total_to_process: u64,
-) -> Result<Vec<PreparedFile>> {
+    mut on_prepared: F,
+) -> Result<()>
+where
+    F: FnMut(PreparedFile) -> Result<()>,
+{
     if scanned_files.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     let worker_count = std::thread::available_parallelism()
@@ -425,9 +429,8 @@ fn prepare_files_batch(
 
     if worker_count <= 1 {
         let mut compressor = zstd::bulk::Compressor::new(1)?;
-        let mut prepared = Vec::with_capacity(scanned_files.len());
         for scanned in scanned_files {
-            let result = prepare_file(scanned, seen_hashes, &mut compressor);
+            let prepared = prepare_file(scanned, seen_hashes, &mut compressor)?;
             let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
             emit(
                 progress,
@@ -436,23 +439,31 @@ fn prepare_files_batch(
                     total: total_to_process,
                 },
             );
-            prepared.push(result?);
+            on_prepared(prepared)?;
         }
-        return Ok(prepared);
+        return Ok(());
     }
 
     let chunk_size = scanned_files.len().div_ceil(worker_count);
 
-    let results: Vec<Vec<Result<PreparedFile>>> = std::thread::scope(|scope| {
+    std::thread::scope(|scope| -> Result<()> {
+        let (sender, receiver) = mpsc::sync_channel::<Result<PreparedFile>>(
+            PREPARED_FILE_PIPELINE_SLOTS.max(worker_count),
+        );
+
         let handles: Vec<_> = scanned_files
             .chunks(chunk_size)
             .map(|chunk| {
+                let sender = sender.clone();
                 scope.spawn(move || {
                     let mut compressor = match zstd::bulk::Compressor::new(1) {
                         Ok(compressor) => compressor,
-                        Err(error) => return vec![Err(error.into())],
+                        Err(error) => {
+                            let _ = sender.send(Err(error.into()));
+                            return;
+                        }
                     };
-                    let mut prepared = Vec::with_capacity(chunk.len());
+
                     for scanned in chunk {
                         let result = prepare_file(scanned, seen_hashes, &mut compressor);
                         let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -463,24 +474,39 @@ fn prepare_files_batch(
                                 total: total_to_process,
                             },
                         );
-                        prepared.push(result);
+                        if sender.send(result).is_err() {
+                            return;
+                        }
                     }
-                    prepared
                 })
             })
             .collect();
+        drop(sender);
 
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-
-    // Flatten and propagate errors
-    let mut all = Vec::with_capacity(scanned_files.len());
-    for chunk_results in results {
-        for result in chunk_results {
-            all.push(result?);
+        let mut consumer_result = Ok(());
+        loop {
+            match receiver.recv() {
+                Ok(Ok(prepared)) => {
+                    if let Err(error) = on_prepared(prepared) {
+                        consumer_result = Err(error);
+                        break;
+                    }
+                }
+                Ok(Err(error)) => {
+                    consumer_result = Err(error);
+                    break;
+                }
+                Err(_) => break,
+            }
         }
-    }
-    Ok(all)
+        drop(receiver);
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        consumer_result
+    })
 }
 
 /// Build tree structure bottom-up from processed files.

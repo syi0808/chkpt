@@ -4,6 +4,7 @@ use chkpt_core::ops::save::{save, SaveOptions};
 use chkpt_core::store::blob::BlobStore;
 use chkpt_core::store::pack::pack_loose_objects;
 use std::fs;
+use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -81,12 +82,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let average = total.divide(config.iterations as f64);
     println!(
-        "average cold_save_ms={:.2} warm_save_ms={:.2} incremental_save_ms={:.2} restore_dry_run_ms={:.2} restore_apply_ms={:.2}",
+        "average cold_save_ms={:.2} warm_save_ms={:.2} incremental_save_ms={:.2} restore_dry_run_ms={:.2} restore_apply_ms={:.2}{}",
         average.cold_save_ms,
         average.warm_save_ms,
         average.incremental_save_ms,
         average.restore_dry_run_ms,
-        average.restore_apply_ms
+        average.restore_apply_ms,
+        peak_rss_suffix()
     );
 
     Ok(())
@@ -236,4 +238,35 @@ fn cleanup_store(path: &Path) -> std::io::Result<()> {
         fs::remove_dir_all(path)?;
     }
     Ok(())
+}
+
+fn peak_rss_suffix() -> String {
+    peak_rss_kb()
+        .map(|peak_rss_kb| format!(" peak_rss_kb={peak_rss_kb}"))
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+fn peak_rss_kb() -> Option<u64> {
+    let mut usage = MaybeUninit::<libc::rusage>::uninit();
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    let usage = unsafe { usage.assume_init() };
+
+    #[cfg(target_os = "macos")]
+    {
+        Some((usage.ru_maxrss as u64).div_ceil(1024))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(usage.ru_maxrss as u64)
+    }
+}
+
+#[cfg(not(unix))]
+fn peak_rss_kb() -> Option<u64> {
+    None
 }
