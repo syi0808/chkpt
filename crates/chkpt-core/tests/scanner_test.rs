@@ -184,3 +184,85 @@ fn test_scan_still_excludes_git_and_chkpt_with_include_deps() {
     assert!(!paths.iter().any(|p| p.starts_with("target")));
     assert!(paths.contains(&"a.txt"));
 }
+
+#[cfg(unix)]
+#[test]
+fn test_scan_includes_symlinks_without_following_them() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("real")).unwrap();
+    fs::write(dir.path().join("real/file.txt"), "content").unwrap();
+    symlink("real/file.txt", dir.path().join("link.txt")).unwrap();
+
+    let files = scan_workspace(dir.path(), None).unwrap();
+    let link = files
+        .iter()
+        .find(|file| file.relative_path == "link.txt")
+        .unwrap();
+
+    assert!(link.is_symlink);
+    assert_eq!(link.absolute_path, dir.path().join("link.txt"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_scan_records_device_for_hardlinks() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("original.txt"), "same").unwrap();
+    fs::hard_link(
+        dir.path().join("original.txt"),
+        dir.path().join("alias.txt"),
+    )
+    .unwrap();
+
+    let files = scan_workspace(dir.path(), None).unwrap();
+    let original = files
+        .iter()
+        .find(|file| file.relative_path == "original.txt")
+        .unwrap();
+    let alias = files
+        .iter()
+        .find(|file| file.relative_path == "alias.txt")
+        .unwrap();
+
+    assert_eq!(original.device, alias.device);
+    assert_eq!(original.inode, alias.inode);
+    assert!(!original.is_symlink);
+    assert!(!alias.is_symlink);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_parallel_and_sequential_walk_include_symlinks_consistently() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/main.js"), "console.log('ok')").unwrap();
+    symlink("src/main.js", dir.path().join("app.js")).unwrap();
+
+    let sequential = chkpt_core::scanner::walker::walk(dir.path(), None, false).unwrap();
+    let parallel = chkpt_core::scanner::walker::walk_parallel(dir.path(), None, false).unwrap();
+
+    let sequential_paths: Vec<_> = sequential.iter().map(|file| file.relative_path.clone()).collect();
+    let parallel_paths: Vec<_> = parallel.iter().map(|file| file.relative_path.clone()).collect();
+
+    assert_eq!(sequential_paths, parallel_paths);
+    assert!(sequential.iter().any(|file| file.relative_path == "app.js" && file.is_symlink));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_scan_excludes_symlink_named_node_modules_by_default() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join("vendor/pkg")).unwrap();
+    fs::write(dir.path().join("vendor/pkg/index.js"), "module.exports = 1").unwrap();
+    symlink("vendor", dir.path().join("node_modules")).unwrap();
+
+    let files = scan_workspace(dir.path(), None).unwrap();
+
+    assert!(!files.iter().any(|file| file.relative_path == "node_modules"));
+}

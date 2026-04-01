@@ -1,7 +1,7 @@
 use crate::error::{ChkpttError, Result};
 use crate::store::blob::{hash_content, BlobStore};
 use memmap2::Mmap;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Cursor, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
@@ -16,6 +16,13 @@ struct IndexEntry {
     hash: [u8; 32],
     offset: u64,
     size: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackLocation {
+    pub(crate) reader_index: usize,
+    pub(crate) offset: u64,
+    pub(crate) size: u64,
 }
 
 pub struct PackWriter {
@@ -195,16 +202,30 @@ impl PackReader {
         self.find(hash_hex).is_some()
     }
 
-    /// Read and decompress an object. Returns None if not found.
-    pub fn try_read(&self, hash_hex: &str) -> Option<Vec<u8>> {
-        let entry = self.find(hash_hex)?;
-        let data_start = entry.offset as usize + 32 + 8; // skip hash + compressed_size
-        let data_end = data_start + entry.size as usize;
+    fn compressed_bytes(&self, offset: u64, size: u64) -> Option<&[u8]> {
+        let data_start = offset as usize + 32 + 8; // skip hash + compressed_size
+        let data_end = data_start.checked_add(size as usize)?;
         if data_end > self.dat.len() {
             return None;
         }
-        let compressed = &self.dat[data_start..data_end];
-        zstd::decode_all(compressed).ok()
+        Some(&self.dat[data_start..data_end])
+    }
+
+    fn copy_at<W: Write>(&self, offset: u64, size: u64, mut writer: W) -> Result<()> {
+        let compressed = self.compressed_bytes(offset, size).ok_or_else(|| {
+            ChkpttError::StoreCorrupted("Pack entry points outside pack data".into())
+        })?;
+        zstd::stream::copy_decode(Cursor::new(compressed), &mut writer)?;
+        Ok(())
+    }
+
+    /// Read and decompress an object. Returns None if not found.
+    pub fn try_read(&self, hash_hex: &str) -> Option<Vec<u8>> {
+        let entry = self.find(hash_hex)?;
+        let mut decompressed = Vec::new();
+        self.copy_at(entry.offset, entry.size, &mut decompressed)
+            .ok()?;
+        Some(decompressed)
     }
 
     /// Read and decompress an object. Error if not found.
@@ -238,9 +259,10 @@ impl PackSet {
     }
 
     pub fn try_read(&self, hash_hex: &str) -> Option<Vec<u8>> {
-        self.readers
-            .iter()
-            .find_map(|reader| reader.try_read(hash_hex))
+        let location = self.locate(hash_hex)?;
+        let mut decompressed = Vec::new();
+        self.copy_to_writer(&location, &mut decompressed).ok()?;
+        Some(decompressed)
     }
 
     pub fn contains(&self, hash_hex: &str) -> bool {
@@ -250,6 +272,33 @@ impl PackSet {
     pub fn read(&self, hash_hex: &str) -> Result<Vec<u8>> {
         self.try_read(hash_hex)
             .ok_or_else(|| ChkpttError::ObjectNotFound(hash_hex.to_string()))
+    }
+
+    pub(crate) fn locate(&self, hash_hex: &str) -> Option<PackLocation> {
+        self.readers
+            .iter()
+            .enumerate()
+            .find_map(|(reader_index, reader)| {
+                reader.find(hash_hex).map(|entry| PackLocation {
+                    reader_index,
+                    offset: entry.offset,
+                    size: entry.size,
+                })
+            })
+    }
+
+    pub(crate) fn copy_to_writer<W: Write>(
+        &self,
+        location: &PackLocation,
+        writer: W,
+    ) -> Result<()> {
+        let reader = self.readers.get(location.reader_index).ok_or_else(|| {
+            ChkpttError::StoreCorrupted(format!(
+                "Pack reader index {} is out of range",
+                location.reader_index
+            ))
+        })?;
+        reader.copy_at(location.offset, location.size, writer)
     }
 }
 

@@ -11,8 +11,10 @@ pub struct ScannedFile {
     pub size: u64,
     pub mtime_secs: i64,
     pub mtime_nanos: i64,
+    pub device: Option<u64>,
     pub inode: Option<u64>,
     pub mode: u32,
+    pub is_symlink: bool,
 }
 
 /// Scan workspace, respecting .chkptignore and built-in exclusions.

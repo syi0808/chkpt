@@ -103,3 +103,29 @@ fn test_save_dedups_against_packed_objects() {
     assert_eq!(result.stats.new_objects, 0);
     assert_eq!(blob_store.list_loose().unwrap().len(), 0);
 }
+
+#[test]
+fn test_save_include_deps_counts_hardlinked_files_without_new_objects_per_link() {
+    let workspace = TempDir::new().unwrap();
+    let pkg_a = workspace.path().join("node_modules/pkg-a");
+    let pkg_b = workspace.path().join("node_modules/pkg-b");
+    fs::create_dir_all(&pkg_a).unwrap();
+    fs::create_dir_all(&pkg_b).unwrap();
+
+    let original = pkg_a.join("index.js");
+    let alias = pkg_b.join("index.js");
+    fs::write(&original, "module.exports = 'same';").unwrap();
+    fs::hard_link(&original, &alias).unwrap();
+
+    let result = save(
+        workspace.path(),
+        SaveOptions {
+            include_deps: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.stats.total_files, 2);
+    assert_eq!(result.stats.new_objects, 1);
+}

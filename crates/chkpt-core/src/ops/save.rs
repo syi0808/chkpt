@@ -4,11 +4,11 @@ use crate::index::{FileEntry, FileIndex};
 use crate::ops::io_order::sort_scanned_refs_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
-use crate::store::blob::BlobStore;
+use crate::store::blob::{read_path_bytes, BlobStore};
 use crate::store::pack::{PackSet, PackWriter};
 use crate::store::snapshot::{Snapshot, SnapshotAttachments, SnapshotStats, SnapshotStore};
 use crate::store::tree::{EntryType, TreeEntry, TreeStore};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -50,6 +50,7 @@ struct ProcessedFile {
     blob_hash_bytes: [u8; 32],
     size: u64,
     mode: u32,
+    entry_type: EntryType,
 }
 
 struct PreparedFile {
@@ -63,11 +64,23 @@ struct PreparedFile {
     mtime_secs: i64,
     mtime_nanos: i64,
     inode: Option<u64>,
+    entry_type: EntryType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct HardlinkKey {
+    device: u64,
+    inode: u64,
+}
+
+#[derive(Debug, Clone)]
+struct HardlinkPrepared {
+    blob_hash_hex: String,
+    blob_hash_bytes: [u8; 32],
 }
 
 const SEEN_HASH_SHARDS: usize = 64;
 const PREPARED_FILE_PIPELINE_SLOTS: usize = 64;
-
 struct ShardedSeenHashes {
     shards: Vec<Mutex<HashSet<[u8; 32]>>>,
 }
@@ -197,6 +210,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
                 mtime_secs,
                 mtime_nanos,
                 inode,
+                entry_type,
             } = prepared;
 
             total_bytes += size;
@@ -225,6 +239,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
                 blob_hash_bytes,
                 size,
                 mode,
+                entry_type,
             });
             Ok(())
         },
@@ -343,12 +358,18 @@ fn cached_processed_file(
             && cached.mtime_nanos == scanned.mtime_nanos
             && cached.size == scanned.size
             && cached.inode == scanned.inode
+            && cached.mode == scanned.mode
         {
             return Some(ProcessedFile {
                 relative_path: scanned.relative_path.clone(),
                 blob_hash_bytes: cached.blob_hash,
                 size: scanned.size,
                 mode: scanned.mode,
+                entry_type: if scanned.is_symlink {
+                    EntryType::Symlink
+                } else {
+                    EntryType::File
+                },
             });
         }
     }
@@ -360,14 +381,7 @@ fn prepare_file(
     seen_hashes: &ShardedSeenHashes,
     compressor: &mut zstd::bulk::Compressor<'_>,
 ) -> Result<PreparedFile> {
-    // Read file with pre-allocated buffer (skip fstat overhead of fs::read)
-    let content = {
-        use std::io::Read;
-        let mut file = std::fs::File::open(&scanned.absolute_path)?;
-        let mut buf = Vec::with_capacity(scanned.size as usize);
-        file.read_to_end(&mut buf)?;
-        buf
-    };
+    let content = read_path_bytes(&scanned.absolute_path, scanned.is_symlink)?;
 
     // Hash (BLAKE3 is ~6 GB/s, negligible cost)
     let hash = blake3::hash(&content);
@@ -395,7 +409,90 @@ fn prepare_file(
         mtime_secs: scanned.mtime_secs,
         mtime_nanos: scanned.mtime_nanos,
         inode: scanned.inode,
+        entry_type: if scanned.is_symlink {
+            EntryType::Symlink
+        } else {
+            EntryType::File
+        },
     })
+}
+
+fn hardlink_key(scanned: &ScannedFile) -> Option<HardlinkKey> {
+    if scanned.is_symlink {
+        return None;
+    }
+
+    Some(HardlinkKey {
+        device: scanned.device?,
+        inode: scanned.inode?,
+    })
+}
+
+fn prepare_file_with_hardlink_cache(
+    scanned: &ScannedFile,
+    seen_hashes: &ShardedSeenHashes,
+    compressor: &mut zstd::bulk::Compressor<'_>,
+    hardlinks: &mut HashMap<HardlinkKey, HardlinkPrepared>,
+) -> Result<PreparedFile> {
+    if let Some(key) = hardlink_key(scanned) {
+        if let Some(cached) = hardlinks.get(&key) {
+            return Ok(PreparedFile {
+                relative_path: scanned.relative_path.clone(),
+                blob_hash_hex: cached.blob_hash_hex.clone(),
+                blob_hash_bytes: cached.blob_hash_bytes,
+                compressed: None,
+                size: scanned.size,
+                mode: scanned.mode,
+                mtime_secs: scanned.mtime_secs,
+                mtime_nanos: scanned.mtime_nanos,
+                inode: scanned.inode,
+                entry_type: if scanned.is_symlink {
+                    EntryType::Symlink
+                } else {
+                    EntryType::File
+                },
+            });
+        }
+
+        let prepared = prepare_file(scanned, seen_hashes, compressor)?;
+        hardlinks.insert(
+            key,
+            HardlinkPrepared {
+                blob_hash_hex: prepared.blob_hash_hex.clone(),
+                blob_hash_bytes: prepared.blob_hash_bytes,
+            },
+        );
+        return Ok(prepared);
+    }
+
+    prepare_file(scanned, seen_hashes, compressor)
+}
+
+fn split_scanned_refs_preserving_hardlinks<'a>(
+    scanned_files: &'a [&'a ScannedFile],
+    worker_count: usize,
+) -> Vec<&'a [&'a ScannedFile]> {
+    if scanned_files.is_empty() {
+        return Vec::new();
+    }
+
+    let target_chunk_size = scanned_files.len().div_ceil(worker_count.max(1));
+    let mut chunks = Vec::with_capacity(worker_count.max(1));
+    let mut start = 0usize;
+
+    while start < scanned_files.len() {
+        let mut end = (start + target_chunk_size).min(scanned_files.len());
+        while end < scanned_files.len()
+            && hardlink_key(scanned_files[end - 1]) == hardlink_key(scanned_files[end])
+            && hardlink_key(scanned_files[end]).is_some()
+        {
+            end += 1;
+        }
+        chunks.push(&scanned_files[start..end]);
+        start = end;
+    }
+
+    chunks
 }
 
 fn compress_with_worker_context(
@@ -429,8 +526,14 @@ where
 
     if worker_count <= 1 {
         let mut compressor = zstd::bulk::Compressor::new(1)?;
+        let mut hardlinks = HashMap::new();
         for scanned in scanned_files {
-            let prepared = prepare_file(scanned, seen_hashes, &mut compressor)?;
+            let prepared = prepare_file_with_hardlink_cache(
+                scanned,
+                seen_hashes,
+                &mut compressor,
+                &mut hardlinks,
+            )?;
             let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
             emit(
                 progress,
@@ -444,15 +547,15 @@ where
         return Ok(());
     }
 
-    let chunk_size = scanned_files.len().div_ceil(worker_count);
+    let chunks = split_scanned_refs_preserving_hardlinks(scanned_files, worker_count);
 
     std::thread::scope(|scope| -> Result<()> {
         let (sender, receiver) = mpsc::sync_channel::<Result<PreparedFile>>(
             PREPARED_FILE_PIPELINE_SLOTS.max(worker_count),
         );
 
-        let handles: Vec<_> = scanned_files
-            .chunks(chunk_size)
+        let handles: Vec<_> = chunks
+            .into_iter()
             .map(|chunk| {
                 let sender = sender.clone();
                 scope.spawn(move || {
@@ -463,9 +566,15 @@ where
                             return;
                         }
                     };
+                    let mut hardlinks = HashMap::new();
 
                     for scanned in chunk {
-                        let result = prepare_file(scanned, seen_hashes, &mut compressor);
+                        let result = prepare_file_with_hardlink_cache(
+                            scanned,
+                            seen_hashes,
+                            &mut compressor,
+                            &mut hardlinks,
+                        );
                         let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
                         emit(
                             progress,
@@ -563,7 +672,7 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
                 };
                 entries.push(TreeEntry {
                     name,
-                    entry_type: EntryType::File,
+                    entry_type: pf.entry_type,
                     hash: pf.blob_hash_bytes,
                     size: pf.size,
                     mode: pf.mode,
@@ -639,6 +748,7 @@ fn register_directory_hierarchy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -729,5 +839,99 @@ mod tests {
         });
 
         assert_eq!(unique_inserts.load(Ordering::Relaxed), 9);
+    }
+
+    #[test]
+    fn test_split_scanned_refs_preserves_hardlink_groups() {
+        let f1 = scanned("a.txt", Some(1));
+        let f2 = scanned("b.txt", Some(1));
+        let f3 = scanned("c.txt", Some(2));
+        let f4 = scanned("d.txt", Some(3));
+        let f5 = scanned("e.txt", Some(3));
+        let refs = vec![&f1, &f2, &f3, &f4, &f5];
+
+        let chunks = split_scanned_refs_preserving_hardlinks(&refs, 2);
+        let paths: Vec<Vec<&str>> = chunks
+            .into_iter()
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|file| file.relative_path.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        assert_eq!(
+            paths,
+            vec![vec!["a.txt", "b.txt", "c.txt"], vec!["d.txt", "e.txt"]]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_prepare_file_with_hardlink_cache_reuses_existing_read() {
+        let dir = TempDir::new().unwrap();
+        let original = dir.path().join("original.txt");
+        let alias = dir.path().join("alias.txt");
+        fs::write(&original, "same-content").unwrap();
+        fs::hard_link(&original, &alias).unwrap();
+
+        let original_scanned = scanned_from_path("original.txt", &original);
+        let alias_scanned = scanned_from_path("alias.txt", &alias);
+        let seen_hashes = ShardedSeenHashes::new(2);
+        let mut compressor = zstd::bulk::Compressor::new(1).unwrap();
+        let mut hardlinks = HashMap::new();
+
+        let first = prepare_file_with_hardlink_cache(
+            &original_scanned,
+            &seen_hashes,
+            &mut compressor,
+            &mut hardlinks,
+        )
+        .unwrap();
+        let second = prepare_file_with_hardlink_cache(
+            &alias_scanned,
+            &seen_hashes,
+            &mut compressor,
+            &mut hardlinks,
+        )
+        .unwrap();
+
+        assert!(first.compressed.is_some());
+        assert!(second.compressed.is_none());
+        assert_eq!(first.blob_hash_bytes, second.blob_hash_bytes);
+        assert_eq!(first.blob_hash_hex, second.blob_hash_hex);
+    }
+
+    fn scanned(relative_path: &str, inode: Option<u64>) -> ScannedFile {
+        ScannedFile {
+            relative_path: relative_path.to_string(),
+            absolute_path: std::path::PathBuf::from(relative_path),
+            size: 1,
+            mtime_secs: 1,
+            mtime_nanos: 1,
+            device: Some(1),
+            inode,
+            mode: 0o100644,
+            is_symlink: false,
+        }
+    }
+
+    #[cfg(unix)]
+    fn scanned_from_path(relative_path: &str, path: &Path) -> ScannedFile {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = fs::metadata(path).unwrap();
+        ScannedFile {
+            relative_path: relative_path.to_string(),
+            absolute_path: path.to_path_buf(),
+            size: metadata.len(),
+            mtime_secs: metadata.mtime(),
+            mtime_nanos: metadata.mtime_nsec(),
+            device: Some(metadata.dev()),
+            inode: Some(metadata.ino()),
+            mode: metadata.mode(),
+            is_symlink: metadata.file_type().is_symlink(),
+        }
     }
 }

@@ -18,7 +18,7 @@ ARTIFACT_ROOT = REPO_ROOT / ".benchmarks"
 FIXTURE_ROOT = ARTIFACT_ROOT / "fixtures"
 RUNS_ROOT = ARTIFACT_ROOT / "runs"
 HOMES_ROOT = ARTIFACT_ROOT / "homes"
-FIXTURE_VERSION = 1
+FIXTURE_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,9 @@ class FixtureSpec:
     small_size: int = 4096
     large_every: int = 0
     large_size: int = 0
+    hardlink_packages: int = 0
+    hardlink_files_per_package: int = 0
+    hardlink_pool_size: int = 0
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,16 @@ FIXTURES: dict[str, FixtureSpec] = {
         files=800,
         dirs=40,
         large_size=128 * 1024,
+    ),
+    "hardlink_modules": FixtureSpec(
+        name="hardlink_modules",
+        kind="hardlink_modules",
+        files=3000,
+        dirs=60,
+        modified_files=200,
+        hardlink_packages=2000,
+        hardlink_files_per_package=20,
+        hardlink_pool_size=128,
     ),
 }
 
@@ -117,6 +130,61 @@ SCENARIOS: dict[str, Scenario] = {
             "3",
         ],
     ),
+    "bench_ops_node_modules_hardlinks": Scenario(
+        name="bench_ops_node_modules_hardlinks",
+        kind="bench_ops",
+        description="End-to-end include-deps workload with hardlink-heavy node_modules files.",
+        command=[
+            "cargo",
+            "run",
+            "--release",
+            "-q",
+            "-p",
+            "chkpt-core",
+            "--example",
+            "bench_ops",
+            "--",
+            "--files",
+            "40000",
+            "--modified-files",
+            "4000",
+            "--dirs",
+            "800",
+            "--iterations",
+            "3",
+            "--include-deps",
+            "--hardlink-fanout",
+            "8",
+        ],
+    ),
+    "bench_ops_node_modules_hardlinks_restore": Scenario(
+        name="bench_ops_node_modules_hardlinks_restore",
+        kind="bench_ops",
+        description="End-to-end include-deps workload with broken hardlink aliases before restore.",
+        command=[
+            "cargo",
+            "run",
+            "--release",
+            "-q",
+            "-p",
+            "chkpt-core",
+            "--example",
+            "bench_ops",
+            "--",
+            "--files",
+            "40000",
+            "--modified-files",
+            "4000",
+            "--dirs",
+            "800",
+            "--iterations",
+            "3",
+            "--include-deps",
+            "--hardlink-fanout",
+            "8",
+            "--break-deps-hardlinks",
+        ],
+    ),
     "save_pipeline_text_small": Scenario(
         name="save_pipeline_text_small",
         kind="save_pipeline",
@@ -144,6 +212,13 @@ SCENARIOS: dict[str, Scenario] = {
         description="Sectioned save path on incompressible binary files.",
         command=["cargo", "bench", "-q", "-p", "chkpt-core", "--bench", "save_pipeline", "--"],
         fixture="random_binary",
+    ),
+    "save_pipeline_hardlink_modules": Scenario(
+        name="save_pipeline_hardlink_modules",
+        kind="save_pipeline",
+        description="Sectioned save path on a hardlink-heavy node_modules-like fixture.",
+        command=["cargo", "bench", "-q", "-p", "chkpt-core", "--bench", "save_pipeline", "--"],
+        fixture="hardlink_modules",
     ),
 }
 
@@ -227,6 +302,7 @@ def write_text_file(path: Path, index: int, version: int, size: int) -> None:
 
 def create_fixture(spec: FixtureSpec, root: Path) -> Path:
     fixture_dir = root / spec.name
+    store_dir = root / f"{spec.name}.store"
     manifest_path = fixture_dir / "fixture-manifest.json"
     manifest = {
         "version": FIXTURE_VERSION,
@@ -235,12 +311,19 @@ def create_fixture(spec: FixtureSpec, root: Path) -> Path:
 
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if existing == manifest:
+        if existing == manifest and (spec.kind != "hardlink_modules" or store_dir.exists()):
             return fixture_dir
 
     if fixture_dir.exists():
         shutil.rmtree(fixture_dir)
+    if store_dir.exists():
+        shutil.rmtree(store_dir)
     fixture_dir.mkdir(parents=True, exist_ok=True)
+
+    if spec.kind == "hardlink_modules":
+        create_hardlink_modules_fixture(spec, fixture_dir, store_dir)
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+        return fixture_dir
 
     for index in range(spec.files):
         dir_path = fixture_dir / f"dir_{index % max(spec.dirs, 1):04d}"
@@ -262,6 +345,64 @@ def create_fixture(spec: FixtureSpec, root: Path) -> Path:
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return fixture_dir
 
+
+def create_hardlink_modules_fixture(spec: FixtureSpec, workspace_dir: Path, store_dir: Path) -> None:
+    ensure_dir(store_dir)
+
+    source_root = workspace_dir / "src"
+    ensure_dir(source_root)
+    for index in range(spec.files):
+        dir_path = source_root / f"dir_{index % max(spec.dirs, 1):04d}"
+        ensure_dir(dir_path)
+        write_text_file(dir_path / f"file_{index:05d}.txt", index, 0, spec.small_size)
+
+    source_pool = store_dir / "pool"
+    ensure_dir(source_pool)
+    for index in range(spec.hardlink_pool_size):
+        payload = deterministic_bytes(spec.small_size + (index % 257), spec.seed + index)
+        (source_pool / f"asset_{index:04d}.js").write_bytes(payload)
+
+    node_modules_root = workspace_dir / "node_modules"
+    ensure_dir(node_modules_root)
+
+    for package_index in range(spec.hardlink_packages):
+        package_dir = node_modules_root / f"pkg_{package_index:05d}"
+        ensure_dir(package_dir)
+        for file_index in range(spec.hardlink_files_per_package):
+            source_index = (package_index * spec.hardlink_files_per_package + file_index) % spec.hardlink_pool_size
+            source_file = source_pool / f"asset_{source_index:04d}.js"
+            target_file = package_dir / f"asset_{file_index:02d}.js"
+            if target_file.exists():
+                target_file.unlink()
+            os.link(source_file, target_file)
+
+    bin_dir = node_modules_root / ".bin"
+    ensure_dir(bin_dir)
+    for package_index in range(min(spec.hardlink_packages, 32)):
+        link_path = bin_dir / f"pkg-{package_index:05d}"
+        if link_path.exists() or link_path.is_symlink():
+            link_path.unlink()
+        target = f"../pkg_{package_index:05d}/asset_00.js"
+        try:
+            os.symlink(target, link_path)
+        except (AttributeError, NotImplementedError, OSError):
+            break
+
+    package_json = workspace_dir / "package.json"
+    package_json.write_text(
+        json.dumps(
+            {
+                "name": "hardlink-modules-fixture",
+                "private": True,
+                "dependencies": {
+                    f"pkg-{index:05d}": "1.0.0" for index in range(min(spec.hardlink_packages, 20))
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
 
 def run_command(cmd: list[str], env: dict[str, str]) -> str:
     completed = subprocess.run(

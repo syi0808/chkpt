@@ -39,6 +39,41 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+fn read_link_bytes(path: &Path) -> Result<Vec<u8>> {
+    let target = std::fs::read_link(path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        return Ok(target.as_os_str().as_bytes().to_vec());
+    }
+
+    #[cfg(not(unix))]
+    {
+        Ok(target.to_string_lossy().into_owned().into_bytes())
+    }
+}
+
+pub fn read_path_bytes(path: &Path, is_symlink: bool) -> Result<Vec<u8>> {
+    if is_symlink {
+        return read_link_bytes(path);
+    }
+
+    let mut file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    let mut buf = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut buf)?;
+    Ok(buf)
+}
+
+pub fn hash_path(path: &Path, is_symlink: bool) -> Result<String> {
+    if is_symlink {
+        return Ok(hash_content(&read_link_bytes(path)?));
+    }
+
+    hash_file(path)
+}
+
 pub struct BlobStore {
     base_dir: PathBuf,
 }

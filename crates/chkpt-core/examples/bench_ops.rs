@@ -15,6 +15,9 @@ struct BenchConfig {
     modified_files: usize,
     dirs: usize,
     iterations: usize,
+    include_deps: bool,
+    hardlink_fanout: usize,
+    break_deps_hardlinks: bool,
 }
 
 impl Default for BenchConfig {
@@ -24,6 +27,9 @@ impl Default for BenchConfig {
             modified_files: 200,
             dirs: 60,
             iterations: 3,
+            include_deps: false,
+            hardlink_fanout: 1,
+            break_deps_hardlinks: false,
         }
     }
 }
@@ -62,8 +68,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut total = Metrics::default();
 
     println!(
-        "benchmark_config files={} modified_files={} dirs={} iterations={}",
-        config.files, config.modified_files, config.dirs, config.iterations
+        "benchmark_config source_files={} deps_files={} modified_files={} dirs={} iterations={} include_deps={} hardlink_fanout={} break_deps_hardlinks={}",
+        source_file_count(config),
+        deps_file_count(config),
+        config.modified_files,
+        config.dirs,
+        config.iterations,
+        u8::from(config.include_deps),
+        config.hardlink_fanout,
+        u8::from(config.break_deps_hardlinks)
     );
 
     for iteration in 0..config.iterations {
@@ -120,10 +133,22 @@ fn parse_args() -> BenchConfig {
                     config.iterations = value.parse().unwrap_or(config.iterations);
                 }
             }
+            "--include-deps" => {
+                config.include_deps = true;
+            }
+            "--hardlink-fanout" => {
+                if let Some(value) = args.next() {
+                    config.hardlink_fanout = value.parse().unwrap_or(config.hardlink_fanout);
+                }
+            }
+            "--break-deps-hardlinks" => {
+                config.break_deps_hardlinks = true;
+            }
             _ => {}
         }
     }
 
+    config.hardlink_fanout = config.hardlink_fanout.max(1);
     config
 }
 
@@ -132,21 +157,24 @@ fn run_iteration(config: BenchConfig) -> Result<Metrics, Box<dyn std::error::Err
     let store_layout = benchmark_store_layout(workspace.path());
     cleanup_store(store_layout.base_dir())?;
 
-    populate_workspace(workspace.path(), config.files, config.dirs, 0)?;
+    populate_workspace(workspace.path(), config)?;
 
-    let cold_save = timed(|| save(workspace.path(), SaveOptions::default()))?;
+    let cold_save = timed(|| save(workspace.path(), save_options(config)))?;
     let baseline_snapshot_id = cold_save.1.snapshot_id;
     let blob_store = BlobStore::new(store_layout.objects_dir());
     if !blob_store.list_loose()?.is_empty() {
         pack_loose_objects(&blob_store, &store_layout.packs_dir())?;
     }
 
-    let warm_save = timed(|| save(workspace.path(), SaveOptions::default()))?;
+    let warm_save = timed(|| save(workspace.path(), save_options(config)))?;
 
-    mutate_workspace(workspace.path(), config.modified_files, config.dirs, 1)?;
-    let incremental_save = timed(|| save(workspace.path(), SaveOptions::default()))?;
+    mutate_workspace(workspace.path(), config, 1)?;
+    let incremental_save = timed(|| save(workspace.path(), save_options(config)))?;
 
-    mutate_workspace(workspace.path(), config.modified_files, config.dirs, 2)?;
+    mutate_workspace(workspace.path(), config, 2)?;
+    if config.break_deps_hardlinks {
+        break_deps_hardlinks(workspace.path(), config, 2)?;
+    }
     let restore_dry_run = timed(|| {
         restore(
             workspace.path(),
@@ -189,38 +217,123 @@ where
     Ok((started.elapsed().as_secs_f64() * 1000.0, result))
 }
 
-fn populate_workspace(
-    root: &Path,
-    files: usize,
-    dirs: usize,
-    version: usize,
-) -> std::io::Result<()> {
-    for index in 0..files {
-        let path = file_path(root, index, dirs);
+fn save_options(config: BenchConfig) -> SaveOptions {
+    SaveOptions {
+        include_deps: config.include_deps,
+        ..Default::default()
+    }
+}
+
+fn populate_workspace(root: &Path, config: BenchConfig) -> std::io::Result<()> {
+    for index in 0..source_file_count(config) {
+        let path = source_file_path(root, index, config);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, make_content(index, version))?;
+        fs::write(path, make_content(index, 0))?;
+    }
+
+    if !config.include_deps {
+        return Ok(());
+    }
+
+    for index in 0..deps_file_count(config) {
+        let path = deps_file_path(root, index, config);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let group_start = hardlink_group_start(index, config.hardlink_fanout);
+        if config.hardlink_fanout > 1 && index != group_start {
+            let source = deps_file_path(root, group_start, config);
+            fs::hard_link(source, path)?;
+        } else {
+            fs::write(path, make_content(group_start, 0))?;
+        }
+    }
+
+    let bin_dir = root.join("node_modules/.bin");
+    fs::create_dir_all(&bin_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        for index in 0..deps_file_count(config).min(32) {
+            let target = format!(
+                "../dir_{:04}/file_{:05}.txt",
+                index % config.dirs.max(1),
+                index
+            );
+            symlink(target, bin_dir.join(format!("fixture-{index:02}")))?;
+        }
     }
     Ok(())
 }
 
-fn mutate_workspace(
-    root: &Path,
-    modified_files: usize,
-    dirs: usize,
-    version: usize,
-) -> std::io::Result<()> {
-    for index in 0..modified_files {
-        fs::write(file_path(root, index, dirs), make_content(index, version))?;
+fn mutate_workspace(root: &Path, config: BenchConfig, version: usize) -> std::io::Result<()> {
+    for index in 0..config.modified_files.min(source_file_count(config)) {
+        let path = source_file_path(root, index, config);
+        fs::write(path, make_content(index, version))?;
     }
     std::thread::sleep(Duration::from_millis(5));
     Ok(())
 }
 
-fn file_path(root: &Path, index: usize, dirs: usize) -> PathBuf {
-    root.join(format!("dir_{:04}", index % dirs.max(1)))
+fn source_file_count(config: BenchConfig) -> usize {
+    config.files
+}
+
+fn deps_file_count(config: BenchConfig) -> usize {
+    if config.include_deps {
+        config.files
+    } else {
+        0
+    }
+}
+
+fn source_file_path(root: &Path, index: usize, config: BenchConfig) -> PathBuf {
+    root.join("src")
+        .join(format!("dir_{:04}", index % config.dirs.max(1)))
         .join(format!("file_{:05}.txt", index))
+}
+
+fn deps_file_path(root: &Path, index: usize, config: BenchConfig) -> PathBuf {
+    root.join("node_modules")
+        .join(format!("dir_{:04}", index % config.dirs.max(1)))
+        .join(format!("file_{:05}.txt", index))
+}
+
+fn hardlink_group_start(index: usize, hardlink_fanout: usize) -> usize {
+    if hardlink_fanout <= 1 {
+        index
+    } else {
+        (index / hardlink_fanout) * hardlink_fanout
+    }
+}
+
+fn break_deps_hardlinks(root: &Path, config: BenchConfig, version: usize) -> std::io::Result<()> {
+    if !config.include_deps || config.hardlink_fanout <= 1 {
+        return Ok(());
+    }
+
+    let mut broken = 0usize;
+    for index in 0..deps_file_count(config) {
+        if index == hardlink_group_start(index, config.hardlink_fanout) {
+            continue;
+        }
+
+        let path = deps_file_path(root, index, config);
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        fs::write(path, make_content(index, version + 100))?;
+        broken += 1;
+
+        if broken >= config.modified_files {
+            break;
+        }
+    }
+
+    std::thread::sleep(Duration::from_millis(5));
+    Ok(())
 }
 
 fn make_content(index: usize, version: usize) -> String {

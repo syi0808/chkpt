@@ -35,6 +35,7 @@ python3 scripts/benchmarks.py run \
   --label step-01 \
   --scenario bench_ops_default \
   --scenario bench_ops_large \
+  --scenario save_pipeline_hardlink_modules \
   --scenario save_pipeline_text_large
 ```
 
@@ -68,3 +69,4 @@ The benchmark runner sets `CHKPT_HOME` to a dedicated directory under `.benchmar
 - `save_pipeline_text_large`: sectioned save path on a larger text fixture.
 - `save_pipeline_mixed_large`: sectioned save path on mixed small and large files.
 - `save_pipeline_random_binary`: sectioned save path on incompressible binary data.
+- `save_pipeline_hardlink_modules`: sectioned save path on a hardlink-heavy node_modules-like fixture.

@@ -31,13 +31,12 @@ pub fn walk(
         let Some(file_type) = entry.file_type() else {
             continue;
         };
-        if !file_type.is_file() {
+        if !file_type.is_file() && !file_type.is_symlink() {
             continue;
         }
 
         let relative = relative_path(root, path);
-        let metadata = entry
-            .metadata()
+        let metadata = std::fs::symlink_metadata(path)
             .map_err(|error| ChkpttError::Other(error.to_string()))?;
         files.push(build_scanned_file(path, &relative, &metadata));
     }
@@ -118,6 +117,9 @@ fn build_walk_builder(root: &Path, matcher: Arc<IgnoreMatcher>) -> WalkBuilder {
             let relative = relative_path(filter_root.as_path(), path);
             if file_type.is_dir() {
                 !filter_matcher.is_ignored(&relative, true)
+            } else if file_type.is_symlink() {
+                !filter_matcher.is_ignored(&relative, false)
+                    && !filter_matcher.is_ignored(&relative, true)
             } else if file_type.is_file() {
                 !filter_matcher.is_ignored(&relative, false)
             } else {
@@ -202,12 +204,12 @@ impl ParallelVisitor for CollectVisitor {
             return WalkState::Continue;
         };
 
-        if !file_type.is_file() {
+        if !file_type.is_file() && !file_type.is_symlink() {
             return WalkState::Continue;
         }
 
         let relative = relative_path(self.root.as_path(), path);
-        let metadata = match entry.metadata() {
+        let metadata = match std::fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
             Err(error) => {
                 self.store_error(ChkpttError::Other(error.to_string()));
@@ -235,8 +237,10 @@ fn build_scanned_file(
         size: metadata.len(),
         mtime_secs: metadata.mtime(),
         mtime_nanos: metadata.mtime_nsec(),
+        device: Some(metadata.dev()),
         inode: Some(metadata.ino()),
         mode: metadata.mode(),
+        is_symlink: metadata.file_type().is_symlink(),
     }
 }
 
@@ -261,7 +265,9 @@ fn build_scanned_file(
         size: metadata.len(),
         mtime_secs,
         mtime_nanos,
+        device: None,
         inode: None,
         mode: 0o644,
+        is_symlink: metadata.file_type().is_symlink(),
     }
 }

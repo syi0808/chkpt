@@ -4,11 +4,12 @@ use crate::index::FileIndex;
 use crate::ops::io_order::sort_scanned_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
-use crate::store::blob::{hash_file, BlobStore};
-use crate::store::pack::{read_object_from_pack_set, PackSet};
+use crate::store::blob::{hash_path, BlobStore};
+use crate::store::pack::{PackLocation, PackSet};
 use crate::store::snapshot::SnapshotStore;
 use crate::store::tree::{EntryType, TreeStore};
 use std::collections::{BTreeMap, HashMap};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -31,6 +32,12 @@ pub struct RestoreResult {
 
 struct CurrentFileState {
     hash_hex: String,
+    is_symlink: bool,
+}
+
+struct TargetFileState {
+    hash_hex: String,
+    is_symlink: bool,
 }
 
 struct RestoreDiff {
@@ -38,6 +45,20 @@ struct RestoreDiff {
     files_to_change: Vec<String>,
     files_to_remove: Vec<String>,
     files_unchanged: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RestoreSource {
+    Loose,
+    Packed(PackLocation),
+}
+
+#[derive(Debug, Clone)]
+struct RestoreTask {
+    path: String,
+    hash_hex: String,
+    is_symlink: bool,
+    source: RestoreSource,
 }
 
 /// Convert a [u8; 32] to a 64-char hex string.
@@ -50,7 +71,7 @@ fn collect_tree_files(
     tree_store: &TreeStore,
     tree_hash_hex: &str,
     prefix: &str,
-    result: &mut BTreeMap<String, String>,
+    result: &mut BTreeMap<String, TargetFileState>,
 ) -> Result<()> {
     let entries = tree_store.read(tree_hash_hex)?;
     for entry in &entries {
@@ -62,14 +83,27 @@ fn collect_tree_files(
         match entry.entry_type {
             EntryType::File => {
                 let blob_hash_hex = bytes_to_hex(&entry.hash);
-                result.insert(path, blob_hash_hex);
+                result.insert(
+                    path,
+                    TargetFileState {
+                        hash_hex: blob_hash_hex,
+                        is_symlink: false,
+                    },
+                );
             }
             EntryType::Dir => {
                 let subtree_hash_hex = bytes_to_hex(&entry.hash);
                 collect_tree_files(tree_store, &subtree_hash_hex, &path, result)?;
             }
             EntryType::Symlink => {
-                // Symlinks are not restored (consistent with scanner skipping them)
+                let blob_hash_hex = bytes_to_hex(&entry.hash);
+                result.insert(
+                    path,
+                    TargetFileState {
+                        hash_hex: blob_hash_hex,
+                        is_symlink: true,
+                    },
+                );
             }
         }
     }
@@ -83,30 +117,42 @@ fn collect_tree_files(
 fn scan_current_state(
     workspace_root: &Path,
     cached_entries: &HashMap<String, crate::index::FileEntry>,
+    include_deps: bool,
 ) -> Result<BTreeMap<String, CurrentFileState>> {
-    let scanned = crate::scanner::scan_workspace(workspace_root, None)?;
+    let scanned = crate::scanner::scan_workspace_with_options(workspace_root, None, include_deps)?;
     let mut state = BTreeMap::new();
     let mut stale_files = Vec::new();
 
     for file in scanned {
         if let Some(hash_hex) = cached_hash_hex(&file, cached_entries) {
-            state.insert(file.relative_path.clone(), CurrentFileState { hash_hex });
+            state.insert(
+                file.relative_path.clone(),
+                CurrentFileState {
+                    hash_hex,
+                    is_symlink: file.is_symlink,
+                },
+            );
         } else {
             stale_files.push(file);
         }
     }
 
     for (file, hash_hex) in hash_scanned_files(stale_files)? {
-        state.insert(file.relative_path.clone(), CurrentFileState { hash_hex });
+        state.insert(
+            file.relative_path.clone(),
+            CurrentFileState {
+                hash_hex,
+                is_symlink: file.is_symlink,
+            },
+        );
     }
     Ok(state)
 }
 
 fn restore_files(
     workspace_root: &Path,
-    restore_tasks: &[(String, String)],
+    restore_tasks: &[RestoreTask],
     blob_store: &BlobStore,
-    has_loose_objects: bool,
     pack_set: &PackSet,
     progress: &ProgressCallback,
     progress_counter: &AtomicU64,
@@ -122,17 +168,8 @@ fn restore_files(
         .min(restore_tasks.len());
     if worker_count <= 1 {
         let mut restored = Vec::with_capacity(restore_tasks.len());
-        for (path, blob_hash_hex) in restore_tasks {
-            let content = if has_loose_objects && blob_store.exists(blob_hash_hex) {
-                blob_store.read(blob_hash_hex)?
-            } else {
-                read_object_from_pack_set(pack_set, blob_hash_hex)?
-            };
-            let file_path = workspace_root.join(path);
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&file_path, &content)?;
+        for task in restore_tasks {
+            restore_file(workspace_root, task, blob_store, pack_set)?;
             let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
             emit(
                 progress,
@@ -141,7 +178,7 @@ fn restore_files(
                     total: restore_total,
                 },
             );
-            restored.push(path.clone());
+            restored.push(task.path.clone());
         }
         return Ok(restored);
     }
@@ -153,17 +190,8 @@ fn restore_files(
             .map(|chunk| {
                 scope.spawn(move || -> Result<Vec<String>> {
                     let mut restored = Vec::with_capacity(chunk.len());
-                    for (path, blob_hash_hex) in chunk {
-                        let content = if has_loose_objects && blob_store.exists(blob_hash_hex) {
-                            blob_store.read(blob_hash_hex)?
-                        } else {
-                            read_object_from_pack_set(pack_set, blob_hash_hex)?
-                        };
-                        let file_path = workspace_root.join(path);
-                        if let Some(parent) = file_path.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        std::fs::write(&file_path, &content)?;
+                    for task in chunk {
+                        restore_file(workspace_root, task, blob_store, pack_set)?;
                         let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
                         emit(
                             progress,
@@ -172,7 +200,7 @@ fn restore_files(
                                 total: restore_total,
                             },
                         );
-                        restored.push(path.clone());
+                        restored.push(task.path.clone());
                     }
                     Ok(restored)
                 })
@@ -190,8 +218,117 @@ fn restore_files(
     })
 }
 
+fn restore_file(
+    workspace_root: &Path,
+    task: &RestoreTask,
+    blob_store: &BlobStore,
+    pack_set: &PackSet,
+) -> Result<()> {
+    let file_path = workspace_root.join(&task.path);
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    if let Ok(metadata) = std::fs::symlink_metadata(&file_path) {
+        if metadata.file_type().is_symlink() || task.is_symlink {
+            std::fs::remove_file(&file_path)?;
+        }
+    }
+
+    match task.source {
+        RestoreSource::Loose => {
+            let content = blob_store.read(&task.hash_hex)?;
+            if task.is_symlink {
+                restore_symlink(&file_path, &content)?;
+            } else {
+                std::fs::write(&file_path, &content)?;
+            }
+        }
+        RestoreSource::Packed(location) => {
+            if task.is_symlink {
+                let content = pack_set.read(&task.hash_hex)?;
+                restore_symlink(&file_path, &content)?;
+            } else {
+                let file = std::fs::File::create(&file_path)?;
+                let mut writer = BufWriter::with_capacity(256 * 1024, file);
+                pack_set.copy_to_writer(&location, &mut writer)?;
+                writer.flush()?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restore_symlink(path: &Path, target_bytes: &[u8]) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let target = std::ffi::OsStr::from_bytes(target_bytes);
+    std::os::unix::fs::symlink(target, path)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restore_symlink(_path: &Path, _target_bytes: &[u8]) -> Result<()> {
+    Err(ChkpttError::RestoreFailed(
+        "symlink restore is only supported on unix platforms".into(),
+    ))
+}
+
+fn build_restore_tasks(
+    files_to_add: &[String],
+    files_to_change: &[String],
+    target_state: &BTreeMap<String, TargetFileState>,
+    blob_store: &BlobStore,
+    has_loose_objects: bool,
+    pack_set: &PackSet,
+) -> Result<Vec<RestoreTask>> {
+    let mut tasks = Vec::with_capacity(files_to_add.len() + files_to_change.len());
+
+    for path in files_to_add.iter().chain(files_to_change.iter()) {
+        let target = target_state
+            .get(path)
+            .expect("target hash missing for restore task");
+        let hash_hex = target.hash_hex.clone();
+
+        let source = if has_loose_objects && blob_store.exists(&hash_hex) {
+            RestoreSource::Loose
+        } else {
+            RestoreSource::Packed(
+                pack_set
+                    .locate(&hash_hex)
+                    .ok_or_else(|| ChkpttError::ObjectNotFound(hash_hex.clone()))?,
+            )
+        };
+
+        tasks.push(RestoreTask {
+            path: path.clone(),
+            hash_hex,
+            is_symlink: target.is_symlink,
+            source,
+        });
+    }
+
+    tasks.sort_unstable_by(|left, right| match (&left.source, &right.source) {
+        (RestoreSource::Packed(left_location), RestoreSource::Packed(right_location)) => (
+            left_location.reader_index,
+            left_location.offset,
+            left.path.as_str(),
+        )
+            .cmp(&(
+                right_location.reader_index,
+                right_location.offset,
+                right.path.as_str(),
+            )),
+        (RestoreSource::Packed(_), RestoreSource::Loose) => std::cmp::Ordering::Less,
+        (RestoreSource::Loose, RestoreSource::Packed(_)) => std::cmp::Ordering::Greater,
+        (RestoreSource::Loose, RestoreSource::Loose) => left.path.cmp(&right.path),
+    });
+    Ok(tasks)
+}
+
 fn diff_restore_states(
-    target_state: &BTreeMap<String, String>,
+    target_state: &BTreeMap<String, TargetFileState>,
     current_state: &BTreeMap<String, CurrentFileState>,
 ) -> RestoreDiff {
     let mut files_to_add = Vec::new();
@@ -204,7 +341,7 @@ fn diff_restore_states(
 
     loop {
         match (target_iter.peek(), current_iter.peek()) {
-            (Some((target_path, target_hash)), Some((current_path, current_file))) => {
+            (Some((target_path, target_file)), Some((current_path, current_file))) => {
                 match target_path.cmp(current_path) {
                     std::cmp::Ordering::Less => {
                         files_to_add.push((*target_path).clone());
@@ -215,7 +352,9 @@ fn diff_restore_states(
                         current_iter.next();
                     }
                     std::cmp::Ordering::Equal => {
-                        if target_hash.as_str() != current_file.hash_hex {
+                        if target_file.hash_hex != current_file.hash_hex
+                            || target_file.is_symlink != current_file.is_symlink
+                        {
                             files_to_change.push((*target_path).clone());
                         } else {
                             files_unchanged += 1;
@@ -305,13 +444,14 @@ pub fn restore(
     // 4. Load snapshot's tree to get target state (path -> blob_hash_hex)
     let tree_store = TreeStore::new(layout.trees_dir());
     let root_tree_hash_hex = bytes_to_hex(&resolved_snapshot.root_tree_hash);
-    let mut target_state: BTreeMap<String, String> = BTreeMap::new();
+    let mut target_state: BTreeMap<String, TargetFileState> = BTreeMap::new();
     collect_tree_files(&tree_store, &root_tree_hash_hex, "", &mut target_state)?;
+    let target_includes_deps = target_state.keys().any(|path| path_contains_dependency_dir(path));
 
     // 5. Scan current workspace to get current state (path -> content_hash_hex)
     let mut index = FileIndex::open(layout.index_path())?;
     let cached_entries = index.entries_by_path()?;
-    let current_state = scan_current_state(workspace_root, &cached_entries)?;
+    let current_state = scan_current_state(workspace_root, &cached_entries, target_includes_deps)?;
     emit(
         &options.progress,
         ProgressEvent::ScanCurrentComplete {
@@ -356,25 +496,19 @@ pub fn restore(
     );
 
     // 8a. Restore files that need to be added or changed (parallel)
-    let restore_tasks: Vec<(String, String)> = files_to_add
-        .iter()
-        .chain(files_to_change.iter())
-        .map(|path| {
-            (
-                path.clone(),
-                target_state
-                    .get(path)
-                    .expect("target hash missing for restore task")
-                    .clone(),
-            )
-        })
-        .collect();
+    let restore_tasks = build_restore_tasks(
+        &files_to_add,
+        &files_to_change,
+        &target_state,
+        &blob_store,
+        has_loose_objects,
+        &pack_set,
+    )?;
     let restore_progress = AtomicU64::new(0);
     let restored_paths = restore_files(
         workspace_root,
         &restore_tasks,
         &blob_store,
-        has_loose_objects,
         &pack_set,
         &options.progress,
         &restore_progress,
@@ -406,6 +540,22 @@ pub fn restore(
     Ok(result)
 }
 
+fn path_contains_dependency_dir(relative_path: &str) -> bool {
+    relative_path.split('/').any(|component| {
+        matches!(
+            component,
+            "node_modules"
+                | ".venv"
+                | "venv"
+                | "__pypackages__"
+                | ".tox"
+                | ".nox"
+                | ".gradle"
+                | ".m2"
+        )
+    })
+}
+
 /// Convert a 64-char hex string to a [u8; 32] array.
 fn hex_to_bytes(hex: &str) -> [u8; 32] {
     let mut bytes = [0u8; 32];
@@ -420,20 +570,20 @@ fn hex_to_bytes(hex: &str) -> [u8; 32] {
 fn restored_index_entries(
     workspace_root: &Path,
     restored_paths: &[String],
-    target_state: &BTreeMap<String, String>,
+    target_state: &BTreeMap<String, TargetFileState>,
 ) -> Result<Vec<crate::index::FileEntry>> {
     let mut file_entries = Vec::with_capacity(restored_paths.len());
     for path in restored_paths {
         let absolute_path = workspace_root.join(path);
-        let metadata = std::fs::metadata(&absolute_path)?;
-        let hash_hex = target_state.get(path).ok_or_else(|| {
+        let metadata = std::fs::symlink_metadata(&absolute_path)?;
+        let target = target_state.get(path).ok_or_else(|| {
             ChkpttError::RestoreFailed(format!("Missing target hash for {}", path))
         })?;
         let scanned = scanned_file_from_metadata(path.clone(), absolute_path, &metadata);
 
         file_entries.push(crate::index::FileEntry {
             path: scanned.relative_path,
-            blob_hash: hex_to_bytes(hash_hex),
+            blob_hash: hex_to_bytes(&target.hash_hex),
             size: scanned.size,
             mtime_secs: scanned.mtime_secs,
             mtime_nanos: scanned.mtime_nanos,
@@ -453,6 +603,7 @@ fn cached_hash_hex(
         && cached.mtime_nanos == file.mtime_nanos
         && cached.size == file.size
         && cached.inode == file.inode
+        && cached.mode == file.mode
     {
         Some(bytes_to_hex(&cached.blob_hash))
     } else {
@@ -474,7 +625,12 @@ fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFil
     if worker_count <= 1 {
         return scanned_files
             .into_iter()
-            .map(|file| Ok((file.clone(), hash_file(&file.absolute_path)?)))
+            .map(|file| {
+                Ok((
+                    file.clone(),
+                    hash_path(&file.absolute_path, file.is_symlink)?,
+                ))
+            })
             .collect();
     }
 
@@ -485,7 +641,12 @@ fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFil
             workers.push(scope.spawn(move || -> Result<Vec<(ScannedFile, String)>> {
                 chunk
                     .iter()
-                    .map(|file| Ok((file.clone(), hash_file(&file.absolute_path)?)))
+                    .map(|file| {
+                        Ok((
+                            file.clone(),
+                            hash_path(&file.absolute_path, file.is_symlink)?,
+                        ))
+                    })
                     .collect()
             }));
         }
@@ -515,8 +676,10 @@ fn scanned_file_from_metadata(
         size: metadata.len(),
         mtime_secs: metadata.mtime(),
         mtime_nanos: metadata.mtime_nsec(),
+        device: Some(metadata.dev()),
         inode: Some(metadata.ino()),
         mode: metadata.mode(),
+        is_symlink: metadata.file_type().is_symlink(),
     }
 }
 
@@ -541,8 +704,10 @@ fn scanned_file_from_metadata(
         size: metadata.len(),
         mtime_secs,
         mtime_nanos,
+        device: None,
         inode: None,
         mode: 0o644,
+        is_symlink: metadata.file_type().is_symlink(),
     }
 }
 
@@ -622,27 +787,48 @@ mod tests {
     #[test]
     fn test_diff_restore_states_classifies_paths() {
         let target_state = BTreeMap::from([
-            ("a.txt".to_string(), "hash-a".to_string()),
-            ("b.txt".to_string(), "hash-b-target".to_string()),
-            ("c.txt".to_string(), "hash-c".to_string()),
+            (
+                "a.txt".to_string(),
+                TargetFileState {
+                    hash_hex: "hash-a".to_string(),
+                    is_symlink: false,
+                },
+            ),
+            (
+                "b.txt".to_string(),
+                TargetFileState {
+                    hash_hex: "hash-b-target".to_string(),
+                    is_symlink: true,
+                },
+            ),
+            (
+                "c.txt".to_string(),
+                TargetFileState {
+                    hash_hex: "hash-c".to_string(),
+                    is_symlink: false,
+                },
+            ),
         ]);
         let current_state = BTreeMap::from([
             (
                 "b.txt".to_string(),
                 CurrentFileState {
                     hash_hex: "hash-b-current".to_string(),
+                    is_symlink: false,
                 },
             ),
             (
                 "c.txt".to_string(),
                 CurrentFileState {
                     hash_hex: "hash-c".to_string(),
+                    is_symlink: false,
                 },
             ),
             (
                 "d.txt".to_string(),
                 CurrentFileState {
                     hash_hex: "hash-d".to_string(),
+                    is_symlink: false,
                 },
             ),
         ]);
@@ -656,7 +842,7 @@ mod tests {
 
     #[test]
     fn test_diff_restore_states_handles_empty_inputs() {
-        let target_state: BTreeMap<String, String> = BTreeMap::new();
+        let target_state: BTreeMap<String, TargetFileState> = BTreeMap::new();
         let current_state: BTreeMap<String, CurrentFileState> = BTreeMap::new();
         let diff = diff_restore_states(&target_state, &current_state);
 
@@ -664,5 +850,26 @@ mod tests {
         assert!(diff.files_to_change.is_empty());
         assert!(diff.files_to_remove.is_empty());
         assert_eq!(diff.files_unchanged, 0);
+    }
+
+    #[test]
+    fn test_diff_restore_states_detects_type_changes() {
+        let target_state = BTreeMap::from([(
+            "link".to_string(),
+            TargetFileState {
+                hash_hex: "same-hash".to_string(),
+                is_symlink: true,
+            },
+        )]);
+        let current_state = BTreeMap::from([(
+            "link".to_string(),
+            CurrentFileState {
+                hash_hex: "same-hash".to_string(),
+                is_symlink: false,
+            },
+        )]);
+
+        let diff = diff_restore_states(&target_state, &current_state);
+        assert_eq!(diff.files_to_change, vec!["link".to_string()]);
     }
 }

@@ -105,18 +105,25 @@ mod tests {
     fn test_builtin_exclusions() {
         let matcher = IgnoreMatcher::new(None, false);
         assert!(matcher.is_ignored(".git", true));
+        assert!(matcher.is_ignored(".git", false));
         assert!(matcher.is_ignored(".git/HEAD", false));
         assert!(matcher.is_ignored("node_modules", true));
+        assert!(matcher.is_ignored("node_modules", false));
         assert!(matcher.is_ignored("node_modules/pkg/index.js", false));
         assert!(matcher.is_ignored(".chkpt", true));
+        assert!(matcher.is_ignored(".chkpt", false));
         assert!(matcher.is_ignored(".chkpt/config", false));
         assert!(matcher.is_ignored("target", true));
+        assert!(matcher.is_ignored("target", false));
         assert!(matcher.is_ignored("target/debug/main", false));
         assert!(matcher.is_ignored("packages/app/node_modules", true));
+        assert!(matcher.is_ignored("packages/app/node_modules", false));
         assert!(matcher.is_ignored("packages/app/node_modules/pkg/index.js", false));
         assert!(matcher.is_ignored("services/api/.venv", true));
+        assert!(matcher.is_ignored("services/api/.venv", false));
         assert!(matcher.is_ignored("services/api/.venv/lib/site.py", false));
         assert!(matcher.is_ignored("crates/core/target", true));
+        assert!(matcher.is_ignored("crates/core/target", false));
         assert!(matcher.is_ignored("crates/core/target/debug/app", false));
     }
 
