@@ -117,10 +117,10 @@ impl PackWriter {
 
         // Persist .dat file
         let dat_path = self.packs_dir.join(format!("pack-{}.dat", pack_hash));
-        if !dat_path.exists() {
-            dat_tmp
-                .persist(&dat_path)
-                .map_err(|error| ChkpttError::Other(error.error.to_string()))?;
+        if let Err(error) = dat_tmp.persist_noclobber(&dat_path) {
+            if error.error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(ChkpttError::Other(error.error.to_string()));
+            }
         }
 
         // Sort idx entries by hash for binary search
