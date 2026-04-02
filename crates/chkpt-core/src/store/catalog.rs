@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
     message TEXT,
     parent_snapshot_id TEXT,
     manifest_snapshot_id TEXT,
+    root_tree_hash BLOB,
     total_files INTEGER NOT NULL,
     total_bytes INTEGER NOT NULL,
     new_objects INTEGER NOT NULL
@@ -39,6 +40,9 @@ CREATE TABLE IF NOT EXISTS blob_index (
 );
 "#;
 
+const SNAPSHOT_SELECT_COLUMNS: &str =
+    "id, created_at, message, parent_snapshot_id, manifest_snapshot_id, root_tree_hash, total_files, total_bytes, new_objects";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogSnapshot {
     pub id: String,
@@ -46,6 +50,7 @@ pub struct CatalogSnapshot {
     pub message: Option<String>,
     pub parent_snapshot_id: Option<String>,
     pub manifest_snapshot_id: Option<String>,
+    pub root_tree_hash: Option<[u8; 32]>,
     pub stats: SnapshotStats,
 }
 
@@ -74,16 +79,32 @@ fn row_to_snapshot(row: &Row<'_>) -> rusqlite::Result<CatalogSnapshot> {
             rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(err))
         })?
         .with_timezone(&Utc);
+    let root_tree_hash = row
+        .get::<_, Option<Vec<u8>>>(5)?
+        .map(|bytes| {
+            if bytes.len() != 32 {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Blob,
+                    format!("expected 32-byte root tree hash, got {}", bytes.len()).into(),
+                ));
+            }
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&bytes);
+            Ok(hash)
+        })
+        .transpose()?;
     Ok(CatalogSnapshot {
         id: row.get(0)?,
         created_at,
         message: row.get(2)?,
         parent_snapshot_id: row.get(3)?,
         manifest_snapshot_id: row.get(4)?,
+        root_tree_hash,
         stats: SnapshotStats {
-            total_files: row.get::<_, i64>(5)? as u64,
-            total_bytes: row.get::<_, i64>(6)? as u64,
-            new_objects: row.get::<_, i64>(7)? as u64,
+            total_files: row.get::<_, i64>(6)? as u64,
+            total_bytes: row.get::<_, i64>(7)? as u64,
+            new_objects: row.get::<_, i64>(8)? as u64,
         },
     })
 }
@@ -125,6 +146,7 @@ impl MetadataCatalog {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(CREATE_SCHEMA)?;
         ensure_manifest_snapshot_column(&conn)?;
+        ensure_root_tree_hash_column(&conn)?;
         Ok(Self { conn })
     }
 
@@ -174,22 +196,21 @@ impl MetadataCatalog {
     }
 
     pub fn load_snapshot(&self, snapshot_id: &str) -> Result<CatalogSnapshot> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects
-             FROM snapshots WHERE id = ?1",
-        )?;
+        let query = format!("SELECT {SNAPSHOT_SELECT_COLUMNS} FROM snapshots WHERE id = ?1");
+        let mut stmt = self.conn.prepare(&query)?;
         stmt.query_row(params![snapshot_id], row_to_snapshot)
             .optional()?
             .ok_or_else(|| ChkpttError::SnapshotNotFound(snapshot_id.to_string()))
     }
 
     pub fn latest_snapshot(&self) -> Result<Option<CatalogSnapshot>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects
+        let query = format!(
+            "SELECT {SNAPSHOT_SELECT_COLUMNS}
              FROM snapshots
              ORDER BY created_at DESC, id DESC
-             LIMIT 1",
-        )?;
+             LIMIT 1"
+        );
+        let mut stmt = self.conn.prepare(&query)?;
         Ok(stmt.query_row([], row_to_snapshot).optional()?)
     }
 
@@ -204,12 +225,13 @@ impl MetadataCatalog {
             return Ok(snapshot);
         }
 
-        let mut stmt = self.conn.prepare(
-            "SELECT id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects
+        let query = format!(
+            "SELECT {SNAPSHOT_SELECT_COLUMNS}
              FROM snapshots
              WHERE id LIKE ?1
-             ORDER BY created_at DESC, id DESC",
-        )?;
+             ORDER BY created_at DESC, id DESC"
+        );
+        let mut stmt = self.conn.prepare(&query)?;
         let prefix = format!("{snapshot_ref}%");
         let matches = stmt
             .query_map(params![prefix], row_to_snapshot)?
@@ -226,16 +248,20 @@ impl MetadataCatalog {
 
     pub fn list_snapshots(&self, limit: Option<usize>) -> Result<Vec<CatalogSnapshot>> {
         let query = if limit.is_some() {
-            "SELECT id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects
-             FROM snapshots
-             ORDER BY created_at DESC, id DESC
-             LIMIT ?1"
+            format!(
+                "SELECT {SNAPSHOT_SELECT_COLUMNS}
+                 FROM snapshots
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT ?1"
+            )
         } else {
-            "SELECT id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects
-             FROM snapshots
-             ORDER BY created_at DESC, id DESC"
+            format!(
+                "SELECT {SNAPSHOT_SELECT_COLUMNS}
+                 FROM snapshots
+                 ORDER BY created_at DESC, id DESC"
+            )
         };
-        let mut stmt = self.conn.prepare(query)?;
+        let mut stmt = self.conn.prepare(&query)?;
         let rows = if let Some(limit) = limit {
             stmt.query_map(params![limit as i64], row_to_snapshot)?
                 .collect::<std::result::Result<Vec<_>, _>>()?
@@ -446,14 +472,15 @@ fn insert_snapshot_row_tx(
         Some(manifest_snapshot_id.to_string())
     };
     tx.execute(
-        "INSERT INTO snapshots (id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO snapshots (id, created_at, message, parent_snapshot_id, manifest_snapshot_id, root_tree_hash, total_files, total_bytes, new_objects)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             snapshot.id,
             snapshot.created_at.to_rfc3339(),
             snapshot.message,
             snapshot.parent_snapshot_id,
             manifest_snapshot_id,
+            snapshot.root_tree_hash.as_ref().map(|hash| hash.as_slice()),
             snapshot.stats.total_files as i64,
             snapshot.stats.total_bytes as i64,
             snapshot.stats.new_objects as i64,
@@ -474,6 +501,19 @@ fn ensure_manifest_snapshot_column(conn: &Connection) -> Result<()> {
             "ALTER TABLE snapshots ADD COLUMN manifest_snapshot_id TEXT",
             [],
         )?;
+    }
+    Ok(())
+}
+
+fn ensure_root_tree_hash_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(snapshots)")?;
+    let has_column = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .any(|name| name == "root_tree_hash");
+    if !has_column {
+        conn.execute("ALTER TABLE snapshots ADD COLUMN root_tree_hash BLOB", [])?;
     }
     Ok(())
 }

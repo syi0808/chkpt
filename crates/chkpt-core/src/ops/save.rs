@@ -7,7 +7,7 @@ use crate::scanner::ScannedFile;
 use crate::store::blob::{read_path_bytes, BlobStore};
 use crate::store::catalog::{BlobLocation, CatalogSnapshot, ManifestEntry, MetadataCatalog};
 use crate::store::pack::{PackSet, PackWriter};
-use crate::store::snapshot::{Snapshot, SnapshotStats, SnapshotStore};
+use crate::store::snapshot::{Snapshot, SnapshotStats};
 use crate::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -285,19 +285,12 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     emit(&options.progress, ProgressEvent::PackComplete);
 
     // 8. Build tree bottom-up (skip if nothing changed)
-    let snapshot_store = SnapshotStore::new(layout.snapshots_dir());
     let latest_catalog_snapshot = catalog.latest_snapshot()?;
-    let latest_snapshot =
-        if (new_objects == 0 && removed_paths.is_empty()) || latest_catalog_snapshot.is_none() {
-            snapshot_store.latest()?
-        } else {
-            None
-        };
 
     let root_tree_hash = if new_objects == 0 && removed_paths.is_empty() {
-        if let Some(ref snap) = latest_snapshot {
+        if let Some(ref snapshot) = latest_catalog_snapshot {
             // Nothing changed — reuse previous tree hash (skip build entirely)
-            snap.root_tree_hash
+            root_tree_hash_for_snapshot(&catalog, snapshot, &TreeStore::new(layout.trees_dir()))?
         } else {
             let tree_store = TreeStore::new(layout.trees_dir());
             let hex = build_tree(&processed_files, &tree_store)?;
@@ -312,8 +305,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     // 9. Find latest snapshot for parent_snapshot_id (already fetched above)
     let parent_snapshot_id = latest_catalog_snapshot
         .as_ref()
-        .map(|snapshot| snapshot.id.clone())
-        .or_else(|| latest_snapshot.map(|snapshot| snapshot.id));
+        .map(|snapshot| snapshot.id.clone());
 
     // 10. Create Snapshot
     let stats = SnapshotStats {
@@ -336,13 +328,13 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         message: snapshot.message.clone(),
         parent_snapshot_id: snapshot.parent_snapshot_id.clone(),
         manifest_snapshot_id: None,
+        root_tree_hash: Some(root_tree_hash),
         stats: stats.clone(),
     };
     let no_manifest_changes =
         new_objects == 0 && removed_paths.is_empty() && updated_entries.is_empty();
 
     // 11. Save snapshot
-    snapshot_store.save(&snapshot)?;
     if no_manifest_changes {
         let manifest_snapshot_id = latest_catalog_snapshot
             .as_ref()
@@ -352,15 +344,8 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
                     .as_deref()
                     .unwrap_or(snapshot.id.as_str())
             })
-            .unwrap_or(
-                snapshot
-                    .parent_snapshot_id
-                    .as_deref()
-                    .unwrap_or(&snapshot.id),
-            );
+            .unwrap_or(snapshot.id.as_str());
         catalog.insert_snapshot_metadata_only(&catalog_snapshot, manifest_snapshot_id)?;
-    } else if latest_catalog_snapshot.is_some() {
-        catalog.insert_snapshot_metadata_only(&catalog_snapshot, &snapshot.id)?;
     } else {
         let mut manifest: Vec<ManifestEntry> = processed_files
             .iter()
@@ -436,6 +421,42 @@ fn store_has_pack_objects(packs_dir: &Path) -> Result<bool> {
     }
 
     Ok(false)
+}
+
+fn root_tree_hash_for_snapshot(
+    catalog: &MetadataCatalog,
+    snapshot: &CatalogSnapshot,
+    tree_store: &TreeStore,
+) -> Result<[u8; 32]> {
+    if let Some(root_tree_hash) = snapshot.root_tree_hash {
+        return Ok(root_tree_hash);
+    }
+
+    let manifest = catalog.snapshot_manifest(&snapshot.id)?;
+    if manifest.is_empty() && snapshot.stats.total_files > 0 {
+        return Err(ChkpttError::StoreCorrupted(format!(
+            "snapshot '{}' is missing both manifest entries and root_tree_hash",
+            snapshot.id
+        )));
+    }
+    let root_tree_hex = build_tree(
+        &manifest
+            .into_iter()
+            .map(|entry| ProcessedFile {
+                relative_path: entry.path,
+                blob_hash_bytes: entry.blob_hash,
+                size: entry.size,
+                mode: entry.mode,
+                entry_type: if entry.mode & 0o170000 == 0o120000 {
+                    EntryType::Symlink
+                } else {
+                    EntryType::File
+                },
+            })
+            .collect::<Vec<_>>(),
+        tree_store,
+    )?;
+    hex_to_bytes(&root_tree_hex)
 }
 
 fn cached_processed_file(

@@ -148,7 +148,11 @@ fn run_iteration(config: BenchConfig) -> Result<Metrics, Box<dyn std::error::Err
     let catalog_path = tempdir.path().join("catalog.sqlite");
     let manifest = build_manifest(config.manifest_entries, config.blob_count);
     let blob_locations = build_blob_locations(config.blob_count);
-    let target_snapshot = build_snapshot(config.seeded_snapshots + 1, config.manifest_entries, config.blob_count);
+    let target_snapshot = build_snapshot(
+        config.seeded_snapshots + 1,
+        config.manifest_entries,
+        config.blob_count,
+    );
 
     let (open_ms, catalog) = timed(|| MetadataCatalog::open(&catalog_path))?;
     seed_snapshots(
@@ -163,7 +167,8 @@ fn run_iteration(config: BenchConfig) -> Result<Metrics, Box<dyn std::error::Err
     let prefix = &target_snapshot.id[..16];
     let (latest_snapshot_ms, _latest) = timed(|| catalog.latest_snapshot())?;
     let (resolve_prefix_ms, resolved) = timed(|| catalog.resolve_snapshot_ref(prefix))?;
-    let (list_snapshots_ms, listed) = timed(|| catalog.list_snapshots(Some(config.seeded_snapshots + 1)))?;
+    let (list_snapshots_ms, listed) =
+        timed(|| catalog.list_snapshots(Some(config.seeded_snapshots + 1)))?;
     let (snapshot_manifest_ms, loaded_manifest) =
         timed(|| catalog.snapshot_manifest(&target_snapshot.id))?;
     let lookup_hash = manifest[manifest.len() / 2].blob_hash;
@@ -241,16 +246,15 @@ fn build_blob_locations(blob_count: usize) -> Vec<([u8; 32], BlobLocation)> {
 }
 
 fn build_snapshot(index: usize, entry_count: usize, blob_count: usize) -> CatalogSnapshot {
-    let created_at = Utc
-        .with_ymd_and_hms(2026, 4, 1, 0, 0, 0)
-        .unwrap()
-        + Duration::seconds(index as i64);
+    let created_at =
+        Utc.with_ymd_and_hms(2026, 4, 1, 0, 0, 0).unwrap() + Duration::seconds(index as i64);
     CatalogSnapshot {
         id: snapshot_id(index),
         created_at,
         message: Some(format!("snapshot-{index}")),
         parent_snapshot_id: (index > 0).then(|| snapshot_id(index - 1)),
         manifest_snapshot_id: None,
+        root_tree_hash: Some(hash_bytes(index + blob_count)),
         stats: SnapshotStats {
             total_files: entry_count as u64,
             total_bytes: (entry_count as u64) * 4096,

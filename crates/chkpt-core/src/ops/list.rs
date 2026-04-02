@@ -20,7 +20,7 @@ fn catalog_snapshot_to_public(snapshot: CatalogSnapshot) -> Result<Snapshot> {
         id: snapshot.id,
         created_at: snapshot.created_at,
         message: snapshot.message,
-        root_tree_hash: [0u8; 32],
+        root_tree_hash: snapshot.root_tree_hash.unwrap_or_default(),
         parent_snapshot_id: snapshot.parent_snapshot_id,
         stats: snapshot.stats,
     })

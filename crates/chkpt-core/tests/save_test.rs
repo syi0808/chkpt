@@ -148,6 +148,21 @@ fn test_save_persists_catalog() {
 }
 
 #[test]
+fn test_save_persists_manifest_for_changed_snapshots() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "v1").unwrap();
+    save(workspace.path(), SaveOptions::default()).unwrap();
+
+    fs::write(workspace.path().join("a.txt"), "v2").unwrap();
+    let result = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    let catalog = MetadataCatalog::open(layout.catalog_path()).unwrap();
+    let manifest = catalog.snapshot_manifest(&result.snapshot_id).unwrap();
+    assert_eq!(manifest.len(), 1);
+}
+
+#[test]
 fn test_save_creates_index_db() {
     let workspace = TempDir::new().unwrap();
     fs::write(workspace.path().join("a.txt"), "same").unwrap();

@@ -3,7 +3,6 @@ use crate::error::Result;
 use crate::ops::lock::ProjectLock;
 use crate::store::blob::BlobStore;
 use crate::store::catalog::{CatalogSnapshot, MetadataCatalog};
-use crate::store::snapshot::SnapshotStore;
 use crate::store::tree::{EntryType, TreeStore};
 use std::collections::HashSet;
 use std::path::Path;
@@ -37,26 +36,28 @@ fn collect_reachable_blobs_from_tree(
 
 fn collect_reachable_blobs(
     catalog: &MetadataCatalog,
-    snapshot_store: &SnapshotStore,
     tree_store: &TreeStore,
     snapshots: &[CatalogSnapshot],
 ) -> Result<Option<HashSet<[u8; 32]>>> {
     let mut reachable = HashSet::new();
 
     for snapshot in snapshots {
+        if snapshot.stats.total_files == 0 {
+            continue;
+        }
+
         let manifest = catalog.snapshot_manifest(&snapshot.id)?;
         if !manifest.is_empty() {
             reachable.extend(manifest.into_iter().map(|entry| entry.blob_hash));
             continue;
         }
 
-        let snapshot_json = match snapshot_store.load(&snapshot.id) {
-            Ok(snapshot_json) => snapshot_json,
-            Err(_) => return Ok(None),
+        let Some(root_tree_hash) = snapshot.root_tree_hash else {
+            return Ok(None);
         };
         if collect_reachable_blobs_from_tree(
             tree_store,
-            &bytes_to_hex(&snapshot_json.root_tree_hash),
+            &bytes_to_hex(&root_tree_hash),
             &mut reachable,
         )
         .is_err()
@@ -78,15 +79,13 @@ pub fn delete(workspace_root: &Path, snapshot_id: &str) -> Result<()> {
     let catalog = MetadataCatalog::open(layout.catalog_path())?;
     catalog.load_snapshot(snapshot_id)?;
     catalog.delete_snapshot(snapshot_id)?;
-    let snapshot_store = SnapshotStore::new(layout.snapshots_dir());
-    snapshot_store.delete(snapshot_id)?;
 
     let blob_store = BlobStore::new(layout.objects_dir());
     let mut touched_packs = HashSet::new();
     let remaining_snapshots = catalog.list_snapshots(None)?;
     let tree_store = TreeStore::new(layout.trees_dir());
     if let Some(reachable_blobs) =
-        collect_reachable_blobs(&catalog, &snapshot_store, &tree_store, &remaining_snapshots)?
+        collect_reachable_blobs(&catalog, &tree_store, &remaining_snapshots)?
     {
         for blob_hash in catalog.all_blob_hashes()? {
             if reachable_blobs.contains(&blob_hash) {

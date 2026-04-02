@@ -6,9 +6,6 @@ import {
   blobExists,
   treeBuild,
   treeLoad,
-  snapshotSave,
-  snapshotLoad,
-  snapshotList,
 } from "../index.js";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -74,55 +71,5 @@ describe("tree store", () => {
     expect(loaded).toHaveLength(1);
     expect(loaded[0].name).toBe("hello.txt");
     expect(loaded[0].entryType).toBe("file");
-  });
-});
-
-describe("snapshot store", () => {
-  let storeDir: string;
-
-  beforeEach(() => {
-    storeDir = mkdtempSync(join(tmpdir(), "chkpt-snap-"));
-    mkdirSync(join(storeDir, "snapshots"), { recursive: true });
-  });
-
-  it("snapshotSave + snapshotLoad roundtrip", async () => {
-    const snapshotsDir = join(storeDir, "snapshots");
-    const snap = {
-      id: "test-snap-001",
-      createdAt: new Date().toISOString(),
-      message: "test snapshot",
-      rootTreeHash: "b".repeat(64),
-      parentSnapshotId: null,
-      stats: { totalFiles: 5, totalBytes: 1024, newObjects: 3 },
-    };
-    await snapshotSave(snapshotsDir, snap);
-    const loaded = await snapshotLoad(snapshotsDir, "test-snap-001");
-    expect(loaded.id).toBe("test-snap-001");
-    expect(loaded.message).toBe("test snapshot");
-    expect(loaded.stats.totalFiles).toBe(5);
-  });
-
-  it("snapshotList returns all snapshots sorted", async () => {
-    const snapshotsDir = join(storeDir, "snapshots");
-    await snapshotSave(snapshotsDir, {
-      id: "snap-a",
-      createdAt: "2026-01-01T00:00:00Z",
-      message: "first",
-      rootTreeHash: "a".repeat(64),
-      parentSnapshotId: null,
-      stats: { totalFiles: 1, totalBytes: 10, newObjects: 1 },
-    });
-    await snapshotSave(snapshotsDir, {
-      id: "snap-b",
-      createdAt: "2026-02-01T00:00:00Z",
-      message: "second",
-      rootTreeHash: "b".repeat(64),
-      parentSnapshotId: "snap-a",
-      stats: { totalFiles: 2, totalBytes: 20, newObjects: 1 },
-    });
-    const list = await snapshotList(snapshotsDir);
-    expect(list).toHaveLength(2);
-    expect(list[0].id).toBe("snap-b");
-    expect(list[1].id).toBe("snap-a");
   });
 });

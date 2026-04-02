@@ -7,7 +7,6 @@ use crate::scanner::ScannedFile;
 use crate::store::blob::{hash_path_bytes, BlobStore};
 use crate::store::catalog::{ManifestEntry, MetadataCatalog};
 use crate::store::pack::{PackLocation, PackSet};
-use crate::store::snapshot::SnapshotStore;
 use crate::store::tree::{EntryType, TreeStore};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufWriter, Write};
@@ -497,15 +496,22 @@ pub fn restore(
     let catalog = MetadataCatalog::open(layout.catalog_path())?;
 
     // 3. Resolve snapshot ID
-    let snapshot_store = SnapshotStore::new(layout.snapshots_dir());
-    let resolved_id = resolve_snapshot_id(&catalog, &snapshot_store, snapshot_id)?;
+    let resolved_snapshot = catalog.resolve_snapshot_ref(snapshot_id)?;
+    let resolved_id = resolved_snapshot.id.clone();
 
     // 4. Load snapshot's tree to get target state (path -> blob_hash_hex)
     let manifest = catalog.snapshot_manifest(&resolved_id)?;
-    let target_state = if manifest.is_empty() {
-        let resolved_snapshot = snapshot_store.load(&resolved_id)?;
+    let target_state = if resolved_snapshot.stats.total_files == 0 {
+        BTreeMap::new()
+    } else if manifest.is_empty() {
         let tree_store = TreeStore::new(layout.trees_dir());
-        let root_tree_hash_hex = bytes_to_hex(&resolved_snapshot.root_tree_hash);
+        let root_tree_hash = resolved_snapshot.root_tree_hash.ok_or_else(|| {
+            ChkpttError::StoreCorrupted(format!(
+                "snapshot '{}' is missing both manifest entries and root_tree_hash",
+                resolved_id
+            ))
+        })?;
+        let root_tree_hash_hex = bytes_to_hex(&root_tree_hash);
         let mut state = BTreeMap::new();
         collect_tree_files(&tree_store, &root_tree_hash_hex, "", &mut state)?;
         state
@@ -614,52 +620,6 @@ pub fn restore(
     index.apply_changes(&files_to_remove, &file_entries)?;
 
     Ok(result)
-}
-
-fn resolve_snapshot_id(
-    catalog: &MetadataCatalog,
-    snapshot_store: &SnapshotStore,
-    snapshot_ref: &str,
-) -> Result<String> {
-    match catalog.resolve_snapshot_ref(snapshot_ref) {
-        Ok(snapshot) => Ok(snapshot.id),
-        Err(ChkpttError::SnapshotNotFound(_)) => {
-            let resolved_snapshot = if snapshot_ref == "latest" {
-                snapshot_store.latest()?.ok_or_else(|| {
-                    ChkpttError::SnapshotNotFound("latest (no snapshots exist)".into())
-                })?
-            } else {
-                match snapshot_store.load(snapshot_ref) {
-                    Ok(snapshot) => snapshot,
-                    Err(ChkpttError::SnapshotNotFound(_)) => {
-                        let all_ids = snapshot_store.all_ids()?;
-                        let matches: Vec<_> = all_ids
-                            .iter()
-                            .filter(|id| id.starts_with(snapshot_ref))
-                            .collect();
-                        match matches.len() {
-                            0 => {
-                                return Err(ChkpttError::SnapshotNotFound(
-                                    snapshot_ref.to_string(),
-                                ));
-                            }
-                            1 => snapshot_store.load(matches[0])?,
-                            _ => {
-                                return Err(ChkpttError::Other(format!(
-                                    "Ambiguous snapshot prefix '{}': matches {} snapshots",
-                                    snapshot_ref,
-                                    matches.len()
-                                )));
-                            }
-                        }
-                    }
-                    Err(error) => return Err(error),
-                }
-            };
-            Ok(resolved_snapshot.id)
-        }
-        Err(error) => Err(error),
-    }
 }
 
 fn path_contains_dependency_dir(relative_path: &str) -> bool {

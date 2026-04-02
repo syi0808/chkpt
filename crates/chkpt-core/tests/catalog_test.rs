@@ -16,6 +16,7 @@ fn sample_snapshot(
         message: message.map(|value| value.to_string()),
         parent_snapshot_id: parent_snapshot_id.map(|value| value.to_string()),
         manifest_snapshot_id: None,
+        root_tree_hash: Some([second as u8; 32]),
         stats: SnapshotStats {
             total_files: 2,
             total_bytes: 15,
@@ -53,6 +54,7 @@ fn test_catalog_snapshot_manifest_round_trip() {
     let loaded = catalog.load_snapshot("snap-a").unwrap();
     assert_eq!(loaded.id, snapshot.id);
     assert_eq!(loaded.message.as_deref(), Some("first"));
+    assert_eq!(loaded.root_tree_hash, snapshot.root_tree_hash);
     assert_eq!(catalog.snapshot_manifest("snap-a").unwrap(), manifest);
 }
 
