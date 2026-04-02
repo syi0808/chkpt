@@ -355,6 +355,8 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
             })
             .unwrap_or(snapshot.parent_snapshot_id.as_deref().unwrap_or(&snapshot.id));
         catalog.insert_snapshot_metadata_only(&catalog_snapshot, manifest_snapshot_id)?;
+    } else if latest_catalog_snapshot.is_some() {
+        catalog.insert_snapshot_metadata_only(&catalog_snapshot, &snapshot.id)?;
     } else {
         let mut manifest: Vec<ManifestEntry> = processed_files
             .iter()
