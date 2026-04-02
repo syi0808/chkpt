@@ -93,16 +93,20 @@ impl TreeStore {
         let encoded = bitcode::encode(&sorted);
         let hash_hex = blake3::hash(&encoded).to_hex().to_string();
         let path = self.tree_path(&hash_hex);
-        if path.exists() {
-            return Ok(hash_hex);
+        let parent = path
+            .parent()
+            .ok_or_else(|| ChkpttError::Other("Tree path missing parent directory".into()))?;
+        std::fs::create_dir_all(parent)?;
+
+        let mut tmp = NamedTempFile::new_in(parent)?;
+        tmp.write_all(&encoded)?;
+        tmp.flush()?;
+
+        match tmp.persist_noclobber(&path) {
+            Ok(_) => Ok(hash_hex),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(hash_hex),
+            Err(error) => Err(error.error.into()),
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp_path = path.with_extension("tmp");
-        std::fs::write(&tmp_path, &encoded)?;
-        std::fs::rename(&tmp_path, &path)?;
-        Ok(hash_hex)
     }
 
     /// Write a batch of pre-computed trees to a pack file.

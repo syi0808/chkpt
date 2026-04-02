@@ -1,8 +1,9 @@
 use crate::error::{ChkpttError, Result};
 use memmap2::Mmap;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::path::Path;
 use std::path::PathBuf;
+use tempfile::NamedTempFile;
 
 const HASH_FILE_MMAP_THRESHOLD: u64 = 256 * 1024;
 
@@ -131,16 +132,20 @@ impl BlobStore {
         compressed: &[u8],
     ) -> Result<bool> {
         let path = self.object_path(hash_hex);
-        if path.exists() {
-            return Ok(false);
+        let parent = path
+            .parent()
+            .ok_or_else(|| ChkpttError::Other("Object path missing parent directory".into()))?;
+        std::fs::create_dir_all(parent)?;
+
+        let mut tmp = NamedTempFile::new_in(parent)?;
+        tmp.write_all(compressed)?;
+        tmp.flush()?;
+
+        match tmp.persist_noclobber(&path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error.error.into()),
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp_path = path.with_extension("tmp");
-        std::fs::write(&tmp_path, compressed)?;
-        std::fs::rename(&tmp_path, &path)?;
-        Ok(true)
     }
 
     /// Write content if the object is not already present.
