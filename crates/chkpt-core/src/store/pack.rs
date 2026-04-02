@@ -207,10 +207,6 @@ impl PackReader {
         self.find_bytes(&hash_bytes)
     }
 
-    pub fn contains(&self, hash_hex: &str) -> bool {
-        self.find(hash_hex).is_some()
-    }
-
     pub fn contains_bytes(&self, hash: &[u8; 32]) -> bool {
         self.find_bytes(hash).is_some()
     }
@@ -245,16 +241,6 @@ impl PackReader {
     pub fn read(&self, hash_hex: &str) -> Result<Vec<u8>> {
         self.try_read(hash_hex)
             .ok_or_else(|| ChkpttError::ObjectNotFound(hash_hex.to_string()))
-    }
-
-    /// List all hashes in this pack.
-    pub fn hashes(&self) -> Vec<String> {
-        (0..self.entry_count)
-            .map(|i| {
-                let entry = self.idx_entry(i);
-                bytes_to_hex(&entry.hash)
-            })
-            .collect()
     }
 }
 
@@ -297,12 +283,10 @@ impl PackSet {
         Some(decompressed)
     }
 
-    pub fn contains(&self, hash_hex: &str) -> bool {
-        self.readers.iter().any(|reader| reader.contains(hash_hex))
-    }
-
     pub fn contains_bytes(&self, hash: &[u8; 32]) -> bool {
-        self.readers.iter().any(|reader| reader.contains_bytes(hash))
+        self.readers
+            .iter()
+            .any(|reader| reader.contains_bytes(hash))
     }
 
     pub fn read(&self, hash_hex: &str) -> Result<Vec<u8>> {
@@ -409,21 +393,6 @@ pub fn pack_loose_objects(blob_store: &BlobStore, packs_dir: &Path) -> Result<St
     Ok(pack_hash)
 }
 
-/// Read an object: first check loose, then packs.
-pub fn read_object(blob_store: &BlobStore, packs_dir: &Path, hash_hex: &str) -> Result<Vec<u8>> {
-    // 1. Try loose first without a separate metadata probe.
-    match blob_store.read(hash_hex) {
-        Ok(content) => return Ok(content),
-        Err(ChkpttError::ObjectNotFound(_)) => {}
-        Err(error) => return Err(error),
-    }
-    read_object_from_pack_set(&PackSet::open_all(packs_dir)?, hash_hex)
-}
-
-pub fn read_object_from_pack_set(pack_set: &PackSet, hash_hex: &str) -> Result<Vec<u8>> {
-    pack_set.read(hash_hex)
-}
-
 fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {
     let mut bytes = [0u8; 32];
     if hex.len() != 64 {
@@ -437,8 +406,4 @@ fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {
             .map_err(|_| ChkpttError::Other("Invalid hex".into()))?;
     }
     Ok(bytes)
-}
-
-fn bytes_to_hex(bytes: &[u8; 32]) -> String {
-    blake3::Hash::from(*bytes).to_hex().to_string()
 }

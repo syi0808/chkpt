@@ -71,11 +71,7 @@ fn row_to_snapshot(row: &Row<'_>) -> rusqlite::Result<CatalogSnapshot> {
     let created_at_raw: String = row.get(1)?;
     let created_at = DateTime::parse_from_rfc3339(&created_at_raw)
         .map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(
-                1,
-                rusqlite::types::Type::Text,
-                Box::new(err),
-            )
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(err))
         })?
         .with_timezone(&Utc);
     Ok(CatalogSnapshot {
@@ -104,7 +100,10 @@ fn row_to_manifest_entry(row: &Row<'_>) -> rusqlite::Result<ManifestEntry> {
     })
 }
 
-fn row_to_blob_location(hash: Vec<u8>, row: &Row<'_>) -> rusqlite::Result<([u8; 32], BlobLocation)> {
+fn row_to_blob_location(
+    hash: Vec<u8>,
+    row: &Row<'_>,
+) -> rusqlite::Result<([u8; 32], BlobLocation)> {
     let mut blob_hash = [0u8; 32];
     blob_hash.copy_from_slice(&hash);
     Ok((
@@ -196,9 +195,9 @@ impl MetadataCatalog {
 
     pub fn resolve_snapshot_ref(&self, snapshot_ref: &str) -> Result<CatalogSnapshot> {
         if snapshot_ref == "latest" {
-            return self
-                .latest_snapshot()?
-                .ok_or_else(|| ChkpttError::SnapshotNotFound("latest (no snapshots exist)".into()));
+            return self.latest_snapshot()?.ok_or_else(|| {
+                ChkpttError::SnapshotNotFound("latest (no snapshots exist)".into())
+            });
         }
 
         if let Ok(snapshot) = self.load_snapshot(snapshot_ref) {
@@ -311,22 +310,7 @@ impl MetadataCatalog {
         Ok(())
     }
 
-    pub fn upsert_blob_location(&self, blob_hash: [u8; 32], location: &BlobLocation) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO blob_index (blob_hash, pack_hash, size)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(blob_hash) DO UPDATE SET
-                pack_hash=excluded.pack_hash,
-                size=excluded.size",
-            params![blob_hash.as_slice(), location.pack_hash, location.size as i64],
-        )?;
-        Ok(())
-    }
-
-    pub fn bulk_upsert_blob_locations(
-        &self,
-        entries: &[([u8; 32], BlobLocation)],
-    ) -> Result<()> {
+    pub fn bulk_upsert_blob_locations(&self, entries: &[([u8; 32], BlobLocation)]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -352,9 +336,9 @@ impl MetadataCatalog {
     }
 
     pub fn blob_location(&self, blob_hash: &[u8; 32]) -> Result<Option<BlobLocation>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT pack_hash, size FROM blob_index WHERE blob_hash = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT pack_hash, size FROM blob_index WHERE blob_hash = ?1")?;
         Ok(stmt
             .query_row(params![blob_hash.as_slice()], |row: &Row<'_>| {
                 Ok(BlobLocation {
@@ -413,25 +397,11 @@ impl MetadataCatalog {
         Ok(hashes)
     }
 
-    pub fn unreferenced_blobs(&self) -> Result<Vec<([u8; 32], BlobLocation)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT blob_index.blob_hash, blob_index.pack_hash, blob_index.size
-             FROM blob_index
-             LEFT JOIN snapshot_files ON snapshot_files.blob_hash = blob_index.blob_hash
-             WHERE snapshot_files.blob_hash IS NULL",
-        )?;
-        let rows = stmt
-            .query_map([], |row: &Row<'_>| {
-                let hash: Vec<u8> = row.get(0)?;
-                row_to_blob_location(hash, row)
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
     pub fn delete_blob_location(&self, blob_hash: &[u8; 32]) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM blob_index WHERE blob_hash = ?1", params![blob_hash.as_slice()])?;
+        self.conn.execute(
+            "DELETE FROM blob_index WHERE blob_hash = ?1",
+            params![blob_hash.as_slice()],
+        )?;
         Ok(())
     }
 
@@ -453,7 +423,11 @@ impl MetadataCatalog {
             .optional()?)
     }
 
-    fn insert_snapshot_row(&self, snapshot: &CatalogSnapshot, manifest_snapshot_id: &str) -> Result<()> {
+    fn insert_snapshot_row(
+        &self,
+        snapshot: &CatalogSnapshot,
+        manifest_snapshot_id: &str,
+    ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         insert_snapshot_row_tx(&tx, snapshot, manifest_snapshot_id)?;
         tx.commit()?;

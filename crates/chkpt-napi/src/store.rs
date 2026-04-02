@@ -143,7 +143,6 @@ pub async fn tree_load(trees_dir: String, hash: String) -> napi::Result<Vec<JsTr
 #[serde(rename_all = "camelCase")]
 struct SerdeSnapshotAttachments {
     deps_key: Option<String>,
-    git_key: Option<String>,
 }
 
 /// Serde-compatible snapshot stats for JSON interop.
@@ -189,7 +188,6 @@ fn serde_snapshot_to_core(js: &SerdeSnapshot) -> napi::Result<Snapshot> {
         parent_snapshot_id: js.parent_snapshot_id.clone(),
         attachments: SnapshotAttachments {
             deps_key: js.attachments.deps_key.clone(),
-            git_key: js.attachments.git_key.clone(),
         },
         stats: SnapshotStats {
             total_files: js.stats.total_files as u64,
@@ -208,7 +206,6 @@ fn core_snapshot_to_serde(snap: &Snapshot) -> SerdeSnapshot {
         parent_snapshot_id: snap.parent_snapshot_id.clone(),
         attachments: SerdeSnapshotAttachments {
             deps_key: snap.attachments.deps_key.clone(),
-            git_key: snap.attachments.git_key.clone(),
         },
         stats: SerdeSnapshotStats {
             total_files: snap.stats.total_files as i64,
@@ -219,7 +216,7 @@ fn core_snapshot_to_serde(snap: &Snapshot) -> SerdeSnapshot {
 }
 
 #[napi(
-    ts_args_type = "snapshotsDir: string, snap: { id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null, gitKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }"
+    ts_args_type = "snapshotsDir: string, snap: { id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }"
 )]
 pub async fn snapshot_save(snapshots_dir: String, snap: serde_json::Value) -> napi::Result<()> {
     let serde_snap: SerdeSnapshot = serde_json::from_value(snap).map_err(|e| {
@@ -232,7 +229,7 @@ pub async fn snapshot_save(snapshots_dir: String, snap: serde_json::Value) -> na
 }
 
 #[napi(
-    ts_return_type = "{ id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null, gitKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }"
+    ts_return_type = "{ id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }"
 )]
 pub async fn snapshot_load(snapshots_dir: String, id: String) -> napi::Result<serde_json::Value> {
     let store = SnapshotStore::new(PathBuf::from(snapshots_dir));
@@ -247,7 +244,7 @@ pub async fn snapshot_load(snapshots_dir: String, id: String) -> napi::Result<se
 }
 
 #[napi(
-    ts_return_type = "Array<{ id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null, gitKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }>"
+    ts_return_type = "Array<{ id: string, createdAt: string, message: string | null, rootTreeHash: string, parentSnapshotId: string | null, attachments: { depsKey: string | null }, stats: { totalFiles: number, totalBytes: number, newObjects: number } }>"
 )]
 pub async fn snapshot_list(snapshots_dir: String) -> napi::Result<serde_json::Value> {
     let store = SnapshotStore::new(PathBuf::from(snapshots_dir));

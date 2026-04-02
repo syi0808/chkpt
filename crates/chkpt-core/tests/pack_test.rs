@@ -171,13 +171,6 @@ fn test_pack_streaming_write_and_read() {
         let read_data = reader.read(hash).unwrap();
         assert_eq!(&read_data, data);
     }
-
-    // Verify hashes list contains all entries
-    let all_hashes = reader.hashes();
-    assert_eq!(all_hashes.len(), 1000);
-    for (hash, _) in &expected {
-        assert!(all_hashes.contains(hash));
-    }
 }
 
 #[test]
@@ -200,20 +193,11 @@ fn test_pack_mmap_reader_large_dataset() {
 
     // Verify every entry can be read back correctly
     for (hash, data) in &expected {
-        assert!(reader.contains(hash));
         let read_data = reader.read(hash).unwrap();
         assert_eq!(&read_data, data);
     }
 
     // Verify non-existent hash returns None
     let fake_hash = "0".repeat(64);
-    assert!(!reader.contains(&fake_hash));
     assert!(reader.try_read(&fake_hash).is_none());
-
-    // Verify hashes list is complete
-    let all_hashes = reader.hashes();
-    assert_eq!(all_hashes.len(), 1000);
-    for (hash, _) in &expected {
-        assert!(all_hashes.contains(hash));
-    }
 }

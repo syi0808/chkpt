@@ -1,4 +1,4 @@
-use chkpt_core::store::blob::{hash_content, hash_file, BlobStore};
+use chkpt_core::store::blob::{hash_content_bytes, hash_path_bytes, BlobStore};
 use std::fs;
 use tempfile::TempDir;
 
@@ -61,26 +61,28 @@ fn test_hash_content_without_storing() {
 }
 
 #[test]
-fn test_hash_file_matches_hash_content() {
+fn test_hash_path_bytes_matches_hash_content() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("large.txt");
     let content = "stream me ".repeat(4096);
     fs::write(&path, &content).unwrap();
 
-    assert_eq!(hash_file(&path).unwrap(), hash_content(content.as_bytes()));
+    assert_eq!(
+        hash_path_bytes(&path, false).unwrap(),
+        hash_content_bytes(content.as_bytes())
+    );
 }
 
 #[test]
-fn test_blob_write_with_known_hash() {
+fn test_blob_write_if_missing_with_known_hash() {
     let dir = TempDir::new().unwrap();
     let store = BlobStore::new(dir.path().to_path_buf());
     let content = b"write with known hash";
     let hash = chkpt_core::store::blob::hash_content(content);
 
-    let stored_hash = store.write_with_hash(&hash, content).unwrap();
-    let read_back = store.read(&stored_hash).unwrap();
+    assert!(store.write_if_missing(&hash, content).unwrap());
+    let read_back = store.read(&hash).unwrap();
 
-    assert_eq!(stored_hash, hash);
     assert_eq!(read_back, content);
 }
 

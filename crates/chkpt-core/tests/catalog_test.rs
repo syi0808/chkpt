@@ -1,7 +1,5 @@
 use chkpt_core::error::ChkpttError;
-use chkpt_core::store::catalog::{
-    BlobLocation, CatalogSnapshot, ManifestEntry, MetadataCatalog,
-};
+use chkpt_core::store::catalog::{BlobLocation, CatalogSnapshot, ManifestEntry, MetadataCatalog};
 use chkpt_core::store::snapshot::SnapshotStats;
 use chrono::{TimeZone, Utc};
 use tempfile::TempDir;
@@ -70,10 +68,7 @@ fn test_catalog_latest_and_prefix_resolution() {
     catalog.insert_snapshot(&newer, &manifest).unwrap();
 
     assert_eq!(catalog.latest_snapshot().unwrap().unwrap().id, newer.id);
-    assert_eq!(
-        catalog.resolve_snapshot_ref("latest").unwrap().id,
-        newer.id
-    );
+    assert_eq!(catalog.resolve_snapshot_ref("latest").unwrap().id, newer.id);
     assert_eq!(
         catalog.resolve_snapshot_ref("019d417e-new").unwrap().id,
         newer.id
@@ -94,7 +89,9 @@ fn test_catalog_rejects_ambiguous_prefix() {
         .unwrap();
 
     let err = catalog.resolve_snapshot_ref("019d417e-a").unwrap_err();
-    assert!(matches!(err, ChkpttError::Other(message) if message.contains("Ambiguous snapshot prefix")));
+    assert!(
+        matches!(err, ChkpttError::Other(message) if message.contains("Ambiguous snapshot prefix"))
+    );
 }
 
 #[test]
@@ -106,13 +103,13 @@ fn test_catalog_tracks_blob_locations_and_cascades_manifest_rows() {
 
     catalog.insert_snapshot(&snapshot, &manifest).unwrap();
     catalog
-        .upsert_blob_location(
+        .bulk_upsert_blob_locations(&[(
             [9u8; 32],
-            &BlobLocation {
+            BlobLocation {
                 pack_hash: Some("pack-1".into()),
                 size: 42,
             },
-        )
+        )])
         .unwrap();
 
     let location = catalog.blob_location(&[9u8; 32]).unwrap().unwrap();

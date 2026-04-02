@@ -93,7 +93,7 @@ describe("snapshot store", () => {
       message: "test snapshot",
       rootTreeHash: "b".repeat(64),
       parentSnapshotId: null,
-      attachments: { depsKey: null, gitKey: null },
+      attachments: { depsKey: null },
       stats: { totalFiles: 5, totalBytes: 1024, newObjects: 3 },
     };
     await snapshotSave(snapshotsDir, snap);
@@ -111,7 +111,7 @@ describe("snapshot store", () => {
       message: "first",
       rootTreeHash: "a".repeat(64),
       parentSnapshotId: null,
-      attachments: { depsKey: null, gitKey: null },
+      attachments: { depsKey: null },
       stats: { totalFiles: 1, totalBytes: 10, newObjects: 1 },
     });
     await snapshotSave(snapshotsDir, {
@@ -120,7 +120,7 @@ describe("snapshot store", () => {
       message: "second",
       rootTreeHash: "b".repeat(64),
       parentSnapshotId: "snap-a",
-      attachments: { depsKey: null, gitKey: null },
+      attachments: { depsKey: null },
       stats: { totalFiles: 2, totalBytes: 20, newObjects: 1 },
     });
     const list = await snapshotList(snapshotsDir);

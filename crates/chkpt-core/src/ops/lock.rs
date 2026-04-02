@@ -36,24 +36,4 @@ impl ProjectLock {
 
         Ok(ProjectLock { _file: file })
     }
-
-    /// Try to acquire an exclusive project lock.
-    ///
-    /// Like [`acquire`](Self::acquire), but returns `Ok(None)` instead of an
-    /// error when the lock is already held by another process.
-    pub fn try_acquire(lock_dir: &Path) -> Result<Option<ProjectLock>> {
-        let lock_path = lock_dir.join("project.lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
-
-        let acquired = file.try_lock_exclusive()?;
-        if !acquired {
-            return Ok(None);
-        }
-
-        Ok(Some(ProjectLock { _file: file }))
-    }
 }

@@ -48,10 +48,6 @@ pub fn hash_file_bytes(path: &Path) -> Result<[u8; 32]> {
     Ok(*hasher.finalize().as_bytes())
 }
 
-pub fn hash_file(path: &Path) -> Result<String> {
-    Ok(blake3::Hash::from(hash_file_bytes(path)?).to_hex().to_string())
-}
-
 fn read_link_bytes(path: &Path) -> Result<Vec<u8>> {
     let target = std::fs::read_link(path)?;
 
@@ -85,12 +81,6 @@ pub fn hash_path_bytes(path: &Path, is_symlink: bool) -> Result<[u8; 32]> {
     }
 
     hash_file_bytes(path)
-}
-
-pub fn hash_path(path: &Path, is_symlink: bool) -> Result<String> {
-    Ok(blake3::Hash::from(hash_path_bytes(path, is_symlink)?)
-        .to_hex()
-        .to_string())
 }
 
 pub struct BlobStore {
@@ -139,12 +129,6 @@ impl BlobStore {
         let hash_hex = hash_content(content);
         self.write_if_missing(&hash_hex, content)?;
         Ok(hash_hex)
-    }
-
-    /// Write content using a caller-provided hash.
-    pub fn write_with_hash(&self, hash_hex: &str, content: &[u8]) -> Result<String> {
-        self.write_if_missing(hash_hex, content)?;
-        Ok(hash_hex.to_string())
     }
 
     /// Write already-compressed content if the object is not already present.
