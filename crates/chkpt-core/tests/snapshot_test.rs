@@ -1,4 +1,4 @@
-use chkpt_core::store::snapshot::{Snapshot, SnapshotAttachments, SnapshotStats, SnapshotStore};
+use chkpt_core::store::snapshot::{Snapshot, SnapshotStats, SnapshotStore};
 use tempfile::TempDir;
 
 #[test]
@@ -9,7 +9,6 @@ fn test_snapshot_save_and_load() {
         Some("test save".into()),
         [0u8; 32],
         None,
-        SnapshotAttachments::default(),
         SnapshotStats {
             total_files: 10,
             total_bytes: 1000,
@@ -33,7 +32,6 @@ fn test_snapshot_list_sorted() {
             Some(format!("snap {}", i)),
             [i as u8; 32],
             None,
-            SnapshotAttachments::default(),
             SnapshotStats {
                 total_files: 0,
                 total_bytes: 0,
@@ -56,7 +54,6 @@ fn test_snapshot_delete() {
         None,
         [0u8; 32],
         None,
-        SnapshotAttachments::default(),
         SnapshotStats {
             total_files: 0,
             total_bytes: 0,
@@ -78,7 +75,6 @@ fn test_snapshot_list_with_limit() {
             None,
             [0u8; 32],
             None,
-            SnapshotAttachments::default(),
             SnapshotStats {
                 total_files: 0,
                 total_bytes: 0,
@@ -99,7 +95,6 @@ fn test_snapshot_latest() {
         Some("first".into()),
         [1u8; 32],
         None,
-        SnapshotAttachments::default(),
         SnapshotStats {
             total_files: 0,
             total_bytes: 0,
@@ -112,7 +107,6 @@ fn test_snapshot_latest() {
         Some("second".into()),
         [2u8; 32],
         None,
-        SnapshotAttachments::default(),
         SnapshotStats {
             total_files: 0,
             total_bytes: 0,
@@ -133,7 +127,6 @@ fn test_snapshot_latest_falls_back_when_pointer_is_stale() {
         Some("only".into()),
         [7u8; 32],
         None,
-        SnapshotAttachments::default(),
         SnapshotStats {
             total_files: 0,
             total_bytes: 0,
@@ -156,7 +149,6 @@ fn test_snapshot_delete_clears_latest_pointer() {
         Some("first".into()),
         [1u8; 32],
         None,
-        SnapshotAttachments::default(),
         SnapshotStats {
             total_files: 0,
             total_bytes: 0,
@@ -169,7 +161,6 @@ fn test_snapshot_delete_clears_latest_pointer() {
         Some("second".into()),
         [2u8; 32],
         None,
-        SnapshotAttachments::default(),
         SnapshotStats {
             total_files: 0,
             total_bytes: 0,

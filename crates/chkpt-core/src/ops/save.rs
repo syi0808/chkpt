@@ -5,9 +5,9 @@ use crate::ops::io_order::sort_scanned_refs_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
 use crate::store::blob::{read_path_bytes, BlobStore};
-use crate::store::pack::{PackSet, PackWriter};
 use crate::store::catalog::{BlobLocation, CatalogSnapshot, ManifestEntry, MetadataCatalog};
-use crate::store::snapshot::{Snapshot, SnapshotAttachments, SnapshotStats, SnapshotStore};
+use crate::store::pack::{PackSet, PackWriter};
+use crate::store::snapshot::{Snapshot, SnapshotStats, SnapshotStore};
 use crate::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -287,13 +287,12 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     // 8. Build tree bottom-up (skip if nothing changed)
     let snapshot_store = SnapshotStore::new(layout.snapshots_dir());
     let latest_catalog_snapshot = catalog.latest_snapshot()?;
-    let latest_snapshot = if (new_objects == 0 && removed_paths.is_empty())
-        || latest_catalog_snapshot.is_none()
-    {
-        snapshot_store.latest()?
-    } else {
-        None
-    };
+    let latest_snapshot =
+        if (new_objects == 0 && removed_paths.is_empty()) || latest_catalog_snapshot.is_none() {
+            snapshot_store.latest()?
+        } else {
+            None
+        };
 
     let root_tree_hash = if new_objects == 0 && removed_paths.is_empty() {
         if let Some(ref snap) = latest_snapshot {
@@ -327,7 +326,6 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         options.message,
         root_tree_hash,
         parent_snapshot_id,
-        SnapshotAttachments::default(),
         stats.clone(),
     );
 
@@ -340,7 +338,8 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         manifest_snapshot_id: None,
         stats: stats.clone(),
     };
-    let no_manifest_changes = new_objects == 0 && removed_paths.is_empty() && updated_entries.is_empty();
+    let no_manifest_changes =
+        new_objects == 0 && removed_paths.is_empty() && updated_entries.is_empty();
 
     // 11. Save snapshot
     snapshot_store.save(&snapshot)?;
@@ -353,7 +352,12 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
                     .as_deref()
                     .unwrap_or(snapshot.id.as_str())
             })
-            .unwrap_or(snapshot.parent_snapshot_id.as_deref().unwrap_or(&snapshot.id));
+            .unwrap_or(
+                snapshot
+                    .parent_snapshot_id
+                    .as_deref()
+                    .unwrap_or(&snapshot.id),
+            );
         catalog.insert_snapshot_metadata_only(&catalog_snapshot, manifest_snapshot_id)?;
     } else if latest_catalog_snapshot.is_some() {
         catalog.insert_snapshot_metadata_only(&catalog_snapshot, &snapshot.id)?;
@@ -747,7 +751,10 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
 
     for dir in &dir_list {
         let file_count = dir_files.get(dir).map(|files| files.len()).unwrap_or(0);
-        let child_count = child_dirs.get(dir).map(|children| children.len()).unwrap_or(0);
+        let child_count = child_dirs
+            .get(dir)
+            .map(|children| children.len())
+            .unwrap_or(0);
         let mut entries: Vec<TreeEntry> = Vec::with_capacity(file_count + child_count);
 
         if let Some(files) = dir_files.get(dir) {

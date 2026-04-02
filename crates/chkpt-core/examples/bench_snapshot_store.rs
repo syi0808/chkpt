@@ -1,4 +1,4 @@
-use chkpt_core::store::snapshot::{Snapshot, SnapshotAttachments, SnapshotStats, SnapshotStore};
+use chkpt_core::store::snapshot::{Snapshot, SnapshotStats, SnapshotStore};
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -27,7 +27,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(format!("snapshot-{index}")),
             [index as u8; 32],
             None,
-            SnapshotAttachments::default(),
             SnapshotStats {
                 total_files: index as u64,
                 total_bytes: (index as u64) * 4096,

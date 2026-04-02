@@ -22,7 +22,6 @@ fn catalog_snapshot_to_public(snapshot: CatalogSnapshot) -> Result<Snapshot> {
         message: snapshot.message,
         root_tree_hash: [0u8; 32],
         parent_snapshot_id: snapshot.parent_snapshot_id,
-        attachments: Default::default(),
         stats: snapshot.stats,
     })
 }

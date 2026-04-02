@@ -4,11 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SnapshotAttachments {
-    pub deps_key: Option<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotStats {
     pub total_files: u64,
@@ -23,7 +18,6 @@ pub struct Snapshot {
     pub message: Option<String>,
     pub root_tree_hash: [u8; 32],
     pub parent_snapshot_id: Option<String>,
-    pub attachments: SnapshotAttachments,
     pub stats: SnapshotStats,
 }
 
@@ -32,7 +26,6 @@ impl Snapshot {
         message: Option<String>,
         root_tree_hash: [u8; 32],
         parent_snapshot_id: Option<String>,
-        attachments: SnapshotAttachments,
         stats: SnapshotStats,
     ) -> Self {
         Self {
@@ -41,7 +34,6 @@ impl Snapshot {
             message,
             root_tree_hash,
             parent_snapshot_id,
-            attachments,
             stats,
         }
     }

@@ -336,7 +336,10 @@ fn resolve_restore_sources(
     let mut can_selectively_open = true;
 
     for hash in &packed_hashes {
-        match blob_locations.get(hash).and_then(|location| location.pack_hash.as_ref()) {
+        match blob_locations
+            .get(hash)
+            .and_then(|location| location.pack_hash.as_ref())
+        {
             Some(pack_hash) => {
                 selected_pack_hashes.insert(pack_hash.clone());
             }
@@ -509,7 +512,9 @@ pub fn restore(
     } else {
         target_state_from_manifest(&manifest)
     };
-    let target_includes_deps = target_state.keys().any(|path| path_contains_dependency_dir(path));
+    let target_includes_deps = target_state
+        .keys()
+        .any(|path| path_contains_dependency_dir(path));
 
     // 5. Scan current workspace to get current state (path -> content_hash_hex)
     let mut index = FileIndex::open(layout.index_path())?;
@@ -634,7 +639,9 @@ fn resolve_snapshot_id(
                             .collect();
                         match matches.len() {
                             0 => {
-                                return Err(ChkpttError::SnapshotNotFound(snapshot_ref.to_string()));
+                                return Err(ChkpttError::SnapshotNotFound(
+                                    snapshot_ref.to_string(),
+                                ));
                             }
                             1 => snapshot_store.load(matches[0])?,
                             _ => {
@@ -754,17 +761,19 @@ fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFil
     std::thread::scope(|scope| {
         let mut workers = Vec::with_capacity(scanned_files.len().div_ceil(chunk_size));
         for chunk in scanned_files.chunks(chunk_size) {
-            workers.push(scope.spawn(move || -> Result<Vec<(ScannedFile, [u8; 32])>> {
-                chunk
-                    .iter()
-                    .map(|file| {
-                        Ok((
-                            file.clone(),
-                            hash_path_bytes(&file.absolute_path, file.is_symlink)?,
-                        ))
-                    })
-                    .collect()
-            }));
+            workers.push(
+                scope.spawn(move || -> Result<Vec<(ScannedFile, [u8; 32])>> {
+                    chunk
+                        .iter()
+                        .map(|file| {
+                            Ok((
+                                file.clone(),
+                                hash_path_bytes(&file.absolute_path, file.is_symlink)?,
+                            ))
+                        })
+                        .collect()
+                }),
+            );
         }
 
         let mut hashed = Vec::with_capacity(scanned_files.len());
