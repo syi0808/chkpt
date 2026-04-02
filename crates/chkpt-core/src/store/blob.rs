@@ -6,18 +6,25 @@ use std::path::PathBuf;
 
 const HASH_FILE_MMAP_THRESHOLD: u64 = 256 * 1024;
 
+/// Compute BLAKE3 hash of content as raw bytes.
+pub fn hash_content_bytes(content: &[u8]) -> [u8; 32] {
+    *blake3::hash(content).as_bytes()
+}
+
 /// Compute BLAKE3 hash of content, return 64-char hex string.
 pub fn hash_content(content: &[u8]) -> String {
-    blake3::hash(content).to_hex().to_string()
+    blake3::Hash::from(hash_content_bytes(content))
+        .to_hex()
+        .to_string()
 }
 
 /// Compute BLAKE3 hash of a file without loading the full file into memory.
-pub fn hash_file(path: &Path) -> Result<String> {
+pub fn hash_file_bytes(path: &Path) -> Result<[u8; 32]> {
     if let Ok(metadata) = std::fs::metadata(path) {
         if metadata.len() >= HASH_FILE_MMAP_THRESHOLD {
             if let Ok(file) = std::fs::File::open(path) {
                 if let Ok(mmap) = unsafe { Mmap::map(&file) } {
-                    return Ok(blake3::hash(&mmap).to_hex().to_string());
+                    return Ok(*blake3::hash(&mmap).as_bytes());
                 }
             }
         }
@@ -36,7 +43,11 @@ pub fn hash_file(path: &Path) -> Result<String> {
         hasher.update(&buffer[..bytes_read]);
     }
 
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(*hasher.finalize().as_bytes())
+}
+
+pub fn hash_file(path: &Path) -> Result<String> {
+    Ok(blake3::Hash::from(hash_file_bytes(path)?).to_hex().to_string())
 }
 
 fn read_link_bytes(path: &Path) -> Result<Vec<u8>> {
@@ -66,12 +77,18 @@ pub fn read_path_bytes(path: &Path, is_symlink: bool) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-pub fn hash_path(path: &Path, is_symlink: bool) -> Result<String> {
+pub fn hash_path_bytes(path: &Path, is_symlink: bool) -> Result<[u8; 32]> {
     if is_symlink {
-        return Ok(hash_content(&read_link_bytes(path)?));
+        return Ok(hash_content_bytes(&read_link_bytes(path)?));
     }
 
-    hash_file(path)
+    hash_file_bytes(path)
+}
+
+pub fn hash_path(path: &Path, is_symlink: bool) -> Result<String> {
+    Ok(blake3::Hash::from(hash_path_bytes(path, is_symlink)?)
+        .to_hex()
+        .to_string())
 }
 
 pub struct BlobStore {

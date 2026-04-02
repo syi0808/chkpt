@@ -4,7 +4,7 @@ use crate::index::FileIndex;
 use crate::ops::io_order::sort_scanned_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
-use crate::store::blob::{hash_path, BlobStore};
+use crate::store::blob::{hash_path_bytes, BlobStore};
 use crate::store::catalog::{ManifestEntry, MetadataCatalog};
 use crate::store::pack::{PackLocation, PackSet};
 use crate::store::snapshot::SnapshotStore;
@@ -32,12 +32,12 @@ pub struct RestoreResult {
 }
 
 struct CurrentFileState {
-    hash_hex: String,
+    hash: [u8; 32],
     is_symlink: bool,
 }
 
 struct TargetFileState {
-    hash_hex: String,
+    hash: [u8; 32],
     is_symlink: bool,
 }
 
@@ -83,11 +83,10 @@ fn collect_tree_files(
         };
         match entry.entry_type {
             EntryType::File => {
-                let blob_hash_hex = bytes_to_hex(&entry.hash);
                 result.insert(
                     path,
                     TargetFileState {
-                        hash_hex: blob_hash_hex,
+                        hash: entry.hash,
                         is_symlink: false,
                     },
                 );
@@ -97,11 +96,10 @@ fn collect_tree_files(
                 collect_tree_files(tree_store, &subtree_hash_hex, &path, result)?;
             }
             EntryType::Symlink => {
-                let blob_hash_hex = bytes_to_hex(&entry.hash);
                 result.insert(
                     path,
                     TargetFileState {
-                        hash_hex: blob_hash_hex,
+                        hash: entry.hash,
                         is_symlink: true,
                     },
                 );
@@ -118,7 +116,7 @@ fn target_state_from_manifest(manifest: &[ManifestEntry]) -> BTreeMap<String, Ta
             (
                 entry.path.clone(),
                 TargetFileState {
-                    hash_hex: bytes_to_hex(&entry.blob_hash),
+                    hash: entry.blob_hash,
                     is_symlink: mode_is_symlink(entry.mode),
                 },
             )
@@ -140,11 +138,11 @@ fn scan_current_state(
     let mut stale_files = Vec::new();
 
     for file in scanned {
-        if let Some(hash_hex) = cached_hash_hex(&file, cached_entries) {
+        if let Some(hash) = cached_hash_bytes(&file, cached_entries) {
             state.insert(
                 file.relative_path.clone(),
                 CurrentFileState {
-                    hash_hex,
+                    hash,
                     is_symlink: file.is_symlink,
                 },
             );
@@ -153,11 +151,11 @@ fn scan_current_state(
         }
     }
 
-    for (file, hash_hex) in hash_scanned_files(stale_files)? {
+    for (file, hash) in hash_scanned_files(stale_files)? {
         state.insert(
             file.relative_path.clone(),
             CurrentFileState {
-                hash_hex,
+                hash,
                 is_symlink: file.is_symlink,
             },
         );
@@ -305,7 +303,7 @@ fn build_restore_tasks(
         let target = target_state
             .get(path)
             .expect("target hash missing for restore task");
-        let hash_hex = target.hash_hex.clone();
+        let hash_hex = bytes_to_hex(&target.hash);
 
         let source = if has_loose_objects && blob_store.exists(&hash_hex) {
             RestoreSource::Loose
@@ -368,7 +366,7 @@ fn diff_restore_states(
                         current_iter.next();
                     }
                     std::cmp::Ordering::Equal => {
-                        if target_file.hash_hex != current_file.hash_hex
+                        if target_file.hash != current_file.hash
                             || target_file.is_symlink != current_file.is_symlink
                         {
                             files_to_change.push((*target_path).clone());
@@ -603,17 +601,6 @@ fn mode_is_symlink(mode: u32) -> bool {
     }
 }
 
-/// Convert a 64-char hex string to a [u8; 32] array.
-fn hex_to_bytes(hex: &str) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    for i in 0..32 {
-        if let Ok(b) = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
-            bytes[i] = b;
-        }
-    }
-    bytes
-}
-
 fn restored_index_entries(
     workspace_root: &Path,
     restored_paths: &[String],
@@ -630,7 +617,7 @@ fn restored_index_entries(
 
         file_entries.push(crate::index::FileEntry {
             path: scanned.relative_path,
-            blob_hash: hex_to_bytes(&target.hash_hex),
+            blob_hash: target.hash,
             size: scanned.size,
             mtime_secs: scanned.mtime_secs,
             mtime_nanos: scanned.mtime_nanos,
@@ -641,10 +628,10 @@ fn restored_index_entries(
     Ok(file_entries)
 }
 
-fn cached_hash_hex(
+fn cached_hash_bytes(
     file: &ScannedFile,
     cached_entries: &HashMap<String, crate::index::FileEntry>,
-) -> Option<String> {
+) -> Option<[u8; 32]> {
     let cached = cached_entries.get(&file.relative_path)?;
     if cached.mtime_secs == file.mtime_secs
         && cached.mtime_nanos == file.mtime_nanos
@@ -652,13 +639,13 @@ fn cached_hash_hex(
         && cached.inode == file.inode
         && cached.mode == file.mode
     {
-        Some(bytes_to_hex(&cached.blob_hash))
+        Some(cached.blob_hash)
     } else {
         None
     }
 }
 
-fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFile, String)>> {
+fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFile, [u8; 32])>> {
     if scanned_files.is_empty() {
         return Ok(Vec::new());
     }
@@ -675,7 +662,7 @@ fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFil
             .map(|file| {
                 Ok((
                     file.clone(),
-                    hash_path(&file.absolute_path, file.is_symlink)?,
+                    hash_path_bytes(&file.absolute_path, file.is_symlink)?,
                 ))
             })
             .collect();
@@ -685,13 +672,13 @@ fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFil
     std::thread::scope(|scope| {
         let mut workers = Vec::new();
         for chunk in scanned_files.chunks(chunk_size) {
-            workers.push(scope.spawn(move || -> Result<Vec<(ScannedFile, String)>> {
+            workers.push(scope.spawn(move || -> Result<Vec<(ScannedFile, [u8; 32])>> {
                 chunk
                     .iter()
                     .map(|file| {
                         Ok((
                             file.clone(),
-                            hash_path(&file.absolute_path, file.is_symlink)?,
+                            hash_path_bytes(&file.absolute_path, file.is_symlink)?,
                         ))
                     })
                     .collect()
@@ -886,21 +873,21 @@ mod tests {
             (
                 "a.txt".to_string(),
                 TargetFileState {
-                    hash_hex: "hash-a".to_string(),
+                    hash: hash_bytes("hash-a"),
                     is_symlink: false,
                 },
             ),
             (
                 "b.txt".to_string(),
                 TargetFileState {
-                    hash_hex: "hash-b-target".to_string(),
+                    hash: hash_bytes("hash-b-target"),
                     is_symlink: true,
                 },
             ),
             (
                 "c.txt".to_string(),
                 TargetFileState {
-                    hash_hex: "hash-c".to_string(),
+                    hash: hash_bytes("hash-c"),
                     is_symlink: false,
                 },
             ),
@@ -909,21 +896,21 @@ mod tests {
             (
                 "b.txt".to_string(),
                 CurrentFileState {
-                    hash_hex: "hash-b-current".to_string(),
+                    hash: hash_bytes("hash-b-current"),
                     is_symlink: false,
                 },
             ),
             (
                 "c.txt".to_string(),
                 CurrentFileState {
-                    hash_hex: "hash-c".to_string(),
+                    hash: hash_bytes("hash-c"),
                     is_symlink: false,
                 },
             ),
             (
                 "d.txt".to_string(),
                 CurrentFileState {
-                    hash_hex: "hash-d".to_string(),
+                    hash: hash_bytes("hash-d"),
                     is_symlink: false,
                 },
             ),
@@ -953,19 +940,23 @@ mod tests {
         let target_state = BTreeMap::from([(
             "link".to_string(),
             TargetFileState {
-                hash_hex: "same-hash".to_string(),
+                hash: hash_bytes("same-hash"),
                 is_symlink: true,
             },
         )]);
         let current_state = BTreeMap::from([(
             "link".to_string(),
             CurrentFileState {
-                hash_hex: "same-hash".to_string(),
+                hash: hash_bytes("same-hash"),
                 is_symlink: false,
             },
         )]);
 
         let diff = diff_restore_states(&target_state, &current_state);
         assert_eq!(diff.files_to_change, vec!["link".to_string()]);
+    }
+
+    fn hash_bytes(label: &str) -> [u8; 32] {
+        *blake3::hash(label.as_bytes()).as_bytes()
     }
 }
