@@ -155,7 +155,6 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     let mut processed_files = Vec::with_capacity(scanned_files.len());
     let mut files_to_prepare = Vec::new();
     let mut updated_entries = Vec::new();
-    let mut manifest = Vec::with_capacity(scanned_files.len());
     let mut blob_locations_to_record = Vec::new();
     let mut new_blob_records = Vec::new();
     let mut total_bytes: u64 = 0;
@@ -171,12 +170,6 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
             cached_processed_file(scanned, cached_entries.get(&scanned.relative_path))
         {
             total_bytes += processed.size;
-            manifest.push(ManifestEntry {
-                path: processed.relative_path.clone(),
-                blob_hash: processed.blob_hash_bytes,
-                size: processed.size,
-                mode: processed.mode,
-            });
             processed_files.push(processed);
         } else {
             files_to_prepare.push(scanned);
@@ -269,12 +262,6 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
                 mode,
                 entry_type,
             });
-            manifest.push(ManifestEntry {
-                path: updated_entries.last().unwrap().path.clone(),
-                blob_hash: blob_hash_bytes,
-                size,
-                mode,
-            });
             Ok(())
         },
     )?;
@@ -325,7 +312,8 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // 9. Find latest snapshot for parent_snapshot_id (already fetched above)
     let parent_snapshot_id = latest_catalog_snapshot
-        .map(|snapshot| snapshot.id)
+        .as_ref()
+        .map(|snapshot| snapshot.id.clone())
         .or_else(|| latest_snapshot.map(|snapshot| snapshot.id));
 
     // 10. Create Snapshot
@@ -349,13 +337,37 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         created_at: snapshot.created_at,
         message: snapshot.message.clone(),
         parent_snapshot_id: snapshot.parent_snapshot_id.clone(),
+        manifest_snapshot_id: None,
         stats: stats.clone(),
     };
-    manifest.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    let no_manifest_changes = new_objects == 0 && removed_paths.is_empty() && updated_entries.is_empty();
 
     // 11. Save snapshot
     snapshot_store.save(&snapshot)?;
-    catalog.insert_snapshot(&catalog_snapshot, &manifest)?;
+    if no_manifest_changes {
+        let manifest_snapshot_id = latest_catalog_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .manifest_snapshot_id
+                    .as_deref()
+                    .unwrap_or(snapshot.id.as_str())
+            })
+            .unwrap_or(snapshot.parent_snapshot_id.as_deref().unwrap_or(&snapshot.id));
+        catalog.insert_snapshot_metadata_only(&catalog_snapshot, manifest_snapshot_id)?;
+    } else {
+        let mut manifest: Vec<ManifestEntry> = processed_files
+            .iter()
+            .map(|processed| ManifestEntry {
+                path: processed.relative_path.clone(),
+                blob_hash: processed.blob_hash_bytes,
+                size: processed.size,
+                mode: processed.mode,
+            })
+            .collect();
+        manifest.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        catalog.insert_snapshot(&catalog_snapshot, &manifest)?;
+    }
 
     // 12. Update only changed index entries and remove stale paths.
     index.apply_changes(&removed_paths, &updated_entries)?;

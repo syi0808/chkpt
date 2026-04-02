@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
     created_at TEXT NOT NULL,
     message TEXT,
     parent_snapshot_id TEXT,
+    manifest_snapshot_id TEXT,
     total_files INTEGER NOT NULL,
     total_bytes INTEGER NOT NULL,
     new_objects INTEGER NOT NULL
@@ -44,6 +45,7 @@ pub struct CatalogSnapshot {
     pub created_at: DateTime<Utc>,
     pub message: Option<String>,
     pub parent_snapshot_id: Option<String>,
+    pub manifest_snapshot_id: Option<String>,
     pub stats: SnapshotStats,
 }
 
@@ -81,10 +83,11 @@ fn row_to_snapshot(row: &Row<'_>) -> rusqlite::Result<CatalogSnapshot> {
         created_at,
         message: row.get(2)?,
         parent_snapshot_id: row.get(3)?,
+        manifest_snapshot_id: row.get(4)?,
         stats: SnapshotStats {
-            total_files: row.get::<_, i64>(4)? as u64,
-            total_bytes: row.get::<_, i64>(5)? as u64,
-            new_objects: row.get::<_, i64>(6)? as u64,
+            total_files: row.get::<_, i64>(5)? as u64,
+            total_bytes: row.get::<_, i64>(6)? as u64,
+            new_objects: row.get::<_, i64>(7)? as u64,
         },
     })
 }
@@ -122,6 +125,7 @@ impl MetadataCatalog {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(CREATE_SCHEMA)?;
+        ensure_manifest_snapshot_column(&conn)?;
         Ok(Self { conn })
     }
 
@@ -130,20 +134,25 @@ impl MetadataCatalog {
         snapshot: &CatalogSnapshot,
         manifest: &[ManifestEntry],
     ) -> Result<()> {
+        self.insert_snapshot_with_manifest_owner(snapshot, manifest, &snapshot.id)
+    }
+
+    pub fn insert_snapshot_metadata_only(
+        &self,
+        snapshot: &CatalogSnapshot,
+        manifest_snapshot_id: &str,
+    ) -> Result<()> {
+        self.insert_snapshot_row(snapshot, manifest_snapshot_id)
+    }
+
+    fn insert_snapshot_with_manifest_owner(
+        &self,
+        snapshot: &CatalogSnapshot,
+        manifest: &[ManifestEntry],
+        manifest_snapshot_id: &str,
+    ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO snapshots (id, created_at, message, parent_snapshot_id, total_files, total_bytes, new_objects)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                snapshot.id,
-                snapshot.created_at.to_rfc3339(),
-                snapshot.message,
-                snapshot.parent_snapshot_id,
-                snapshot.stats.total_files as i64,
-                snapshot.stats.total_bytes as i64,
-                snapshot.stats.new_objects as i64,
-            ],
-        )?;
+        insert_snapshot_row_tx(&tx, snapshot, manifest_snapshot_id)?;
 
         {
             let mut stmt = tx.prepare(
@@ -167,7 +176,7 @@ impl MetadataCatalog {
 
     pub fn load_snapshot(&self, snapshot_id: &str) -> Result<CatalogSnapshot> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, created_at, message, parent_snapshot_id, total_files, total_bytes, new_objects
+            "SELECT id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects
              FROM snapshots WHERE id = ?1",
         )?;
         stmt.query_row(params![snapshot_id], row_to_snapshot)
@@ -177,7 +186,7 @@ impl MetadataCatalog {
 
     pub fn latest_snapshot(&self) -> Result<Option<CatalogSnapshot>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, created_at, message, parent_snapshot_id, total_files, total_bytes, new_objects
+            "SELECT id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects
              FROM snapshots
              ORDER BY created_at DESC, id DESC
              LIMIT 1",
@@ -197,7 +206,7 @@ impl MetadataCatalog {
         }
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, created_at, message, parent_snapshot_id, total_files, total_bytes, new_objects
+            "SELECT id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects
              FROM snapshots
              WHERE id LIKE ?1
              ORDER BY created_at DESC, id DESC",
@@ -218,12 +227,12 @@ impl MetadataCatalog {
 
     pub fn list_snapshots(&self, limit: Option<usize>) -> Result<Vec<CatalogSnapshot>> {
         let query = if limit.is_some() {
-            "SELECT id, created_at, message, parent_snapshot_id, total_files, total_bytes, new_objects
+            "SELECT id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects
              FROM snapshots
              ORDER BY created_at DESC, id DESC
              LIMIT ?1"
         } else {
-            "SELECT id, created_at, message, parent_snapshot_id, total_files, total_bytes, new_objects
+            "SELECT id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects
              FROM snapshots
              ORDER BY created_at DESC, id DESC"
         };
@@ -239,6 +248,9 @@ impl MetadataCatalog {
     }
 
     pub fn snapshot_manifest(&self, snapshot_id: &str) -> Result<Vec<ManifestEntry>> {
+        let Some(manifest_snapshot_id) = self.manifest_snapshot_owner(snapshot_id)? else {
+            return Ok(Vec::new());
+        };
         let mut stmt = self.conn.prepare(
             "SELECT path, blob_hash, size, mode
              FROM snapshot_files
@@ -246,18 +258,56 @@ impl MetadataCatalog {
              ORDER BY path",
         )?;
         let entries = stmt
-            .query_map(params![snapshot_id], row_to_manifest_entry)?
+            .query_map(params![manifest_snapshot_id], row_to_manifest_entry)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(entries)
     }
 
     pub fn delete_snapshot(&self, snapshot_id: &str) -> Result<()> {
-        let deleted = self
-            .conn
-            .execute("DELETE FROM snapshots WHERE id = ?1", params![snapshot_id])?;
+        let snapshot = self.load_snapshot(snapshot_id)?;
+        let manifest_owner = snapshot
+            .manifest_snapshot_id
+            .clone()
+            .unwrap_or_else(|| snapshot.id.clone());
+        let tx = self.conn.unchecked_transaction()?;
+
+        if manifest_owner == snapshot_id {
+            let aliases = {
+                let mut stmt = tx.prepare(
+                    "SELECT id
+                     FROM snapshots
+                     WHERE manifest_snapshot_id = ?1
+                     ORDER BY created_at DESC, id DESC",
+                )?;
+                let rows = stmt.query_map(params![snapshot_id], |row| row.get::<_, String>(0))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            if let Some(new_owner_id) = aliases.first() {
+                tx.execute(
+                    "UPDATE snapshot_files SET snapshot_id = ?1 WHERE snapshot_id = ?2",
+                    params![new_owner_id, snapshot_id],
+                )?;
+                tx.execute(
+                    "UPDATE snapshots
+                     SET manifest_snapshot_id = ?1
+                     WHERE manifest_snapshot_id = ?2",
+                    params![new_owner_id, snapshot_id],
+                )?;
+                tx.execute(
+                    "UPDATE snapshots
+                     SET manifest_snapshot_id = NULL
+                     WHERE id = ?1",
+                    params![new_owner_id],
+                )?;
+            }
+        }
+
+        let deleted = tx.execute("DELETE FROM snapshots WHERE id = ?1", params![snapshot_id])?;
         if deleted == 0 {
             return Err(ChkpttError::SnapshotNotFound(snapshot_id.to_string()));
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -391,6 +441,67 @@ impl MetadataCatalog {
             .prepare("SELECT COUNT(*) FROM blob_index WHERE pack_hash = ?1")?;
         Ok(stmt.query_row(params![pack_hash], |row: &Row<'_>| row.get::<_, i64>(0))? as u64)
     }
+
+    fn manifest_snapshot_owner(&self, snapshot_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(manifest_snapshot_id, id)
+             FROM snapshots
+             WHERE id = ?1",
+        )?;
+        Ok(stmt
+            .query_row(params![snapshot_id], |row| row.get::<_, String>(0))
+            .optional()?)
+    }
+
+    fn insert_snapshot_row(&self, snapshot: &CatalogSnapshot, manifest_snapshot_id: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        insert_snapshot_row_tx(&tx, snapshot, manifest_snapshot_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+fn insert_snapshot_row_tx(
+    tx: &rusqlite::Transaction<'_>,
+    snapshot: &CatalogSnapshot,
+    manifest_snapshot_id: &str,
+) -> Result<()> {
+    let manifest_snapshot_id = if manifest_snapshot_id == snapshot.id {
+        None::<String>
+    } else {
+        Some(manifest_snapshot_id.to_string())
+    };
+    tx.execute(
+        "INSERT INTO snapshots (id, created_at, message, parent_snapshot_id, manifest_snapshot_id, total_files, total_bytes, new_objects)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            snapshot.id,
+            snapshot.created_at.to_rfc3339(),
+            snapshot.message,
+            snapshot.parent_snapshot_id,
+            manifest_snapshot_id,
+            snapshot.stats.total_files as i64,
+            snapshot.stats.total_bytes as i64,
+            snapshot.stats.new_objects as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+fn ensure_manifest_snapshot_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(snapshots)")?;
+    let has_column = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .any(|name| name == "manifest_snapshot_id");
+    if !has_column {
+        conn.execute(
+            "ALTER TABLE snapshots ADD COLUMN manifest_snapshot_id TEXT",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -6,6 +6,15 @@ use chkpt_core::error::ChkpttError;
 use std::fs;
 use tempfile::TempDir;
 
+fn unique_prefix(snapshot_id: &str, other_snapshot_id: &str) -> String {
+    let shared = snapshot_id
+        .chars()
+        .zip(other_snapshot_id.chars())
+        .take_while(|(left, right)| left == right)
+        .count();
+    snapshot_id.chars().take(shared + 1).collect()
+}
+
 /// Full lifecycle: save -> list -> restore -> verify
 #[test]
 fn test_e2e_save_list_restore() {
@@ -275,16 +284,16 @@ fn test_e2e_restore_unique_prefix() {
 
     fs::write(workspace.path().join("a.txt"), "v3").unwrap();
 
-    let prefix = &r1.snapshot_id[..12];
-    restore(workspace.path(), prefix, RestoreOptions::default()).unwrap();
+    let prefix = unique_prefix(&r1.snapshot_id, &r2.snapshot_id);
+    restore(workspace.path(), &prefix, RestoreOptions::default()).unwrap();
     assert_eq!(
         fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
         "v1"
     );
 
     fs::write(workspace.path().join("a.txt"), "v4").unwrap();
-    let latest_prefix = &r2.snapshot_id[..12];
-    restore(workspace.path(), latest_prefix, RestoreOptions::default()).unwrap();
+    let latest_prefix = unique_prefix(&r2.snapshot_id, &r1.snapshot_id);
+    restore(workspace.path(), &latest_prefix, RestoreOptions::default()).unwrap();
     assert_eq!(
         fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
         "v2"

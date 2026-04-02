@@ -250,6 +250,7 @@ fn build_snapshot(index: usize, entry_count: usize, blob_count: usize) -> Catalo
         created_at,
         message: Some(format!("snapshot-{index}")),
         parent_snapshot_id: (index > 0).then(|| snapshot_id(index - 1)),
+        manifest_snapshot_id: None,
         stats: SnapshotStats {
             total_files: entry_count as u64,
             total_bytes: (entry_count as u64) * 4096,

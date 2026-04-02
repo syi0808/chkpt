@@ -17,6 +17,7 @@ fn sample_snapshot(
         created_at: Utc.with_ymd_and_hms(2026, 3, 31, 1, 0, second).unwrap(),
         message: message.map(|value| value.to_string()),
         parent_snapshot_id: parent_snapshot_id.map(|value| value.to_string()),
+        manifest_snapshot_id: None,
         stats: SnapshotStats {
             total_files: 2,
             total_bytes: 15,
@@ -124,6 +125,40 @@ fn test_catalog_tracks_blob_locations_and_cascades_manifest_rows() {
         Err(ChkpttError::SnapshotNotFound(_))
     ));
     assert!(catalog.snapshot_manifest("snap-a").unwrap().is_empty());
+}
+
+#[test]
+fn test_catalog_reuses_manifest_for_metadata_only_snapshots() {
+    let dir = TempDir::new().unwrap();
+    let catalog = MetadataCatalog::open(dir.path().join("catalog.sqlite")).unwrap();
+    let base = sample_snapshot("snap-a", 0, Some("first"), None);
+    let alias = sample_snapshot("snap-b", 1, Some("second"), Some("snap-a"));
+    let manifest = sample_manifest();
+
+    catalog.insert_snapshot(&base, &manifest).unwrap();
+    catalog
+        .insert_snapshot_metadata_only(&alias, &base.id)
+        .unwrap();
+
+    assert_eq!(catalog.snapshot_manifest("snap-b").unwrap(), manifest);
+}
+
+#[test]
+fn test_catalog_delete_transfers_manifest_ownership_to_alias() {
+    let dir = TempDir::new().unwrap();
+    let catalog = MetadataCatalog::open(dir.path().join("catalog.sqlite")).unwrap();
+    let base = sample_snapshot("snap-a", 0, Some("first"), None);
+    let alias = sample_snapshot("snap-b", 1, Some("second"), Some("snap-a"));
+    let manifest = sample_manifest();
+
+    catalog.insert_snapshot(&base, &manifest).unwrap();
+    catalog
+        .insert_snapshot_metadata_only(&alias, &base.id)
+        .unwrap();
+
+    catalog.delete_snapshot("snap-a").unwrap();
+
+    assert_eq!(catalog.snapshot_manifest("snap-b").unwrap(), manifest);
 }
 
 #[test]
