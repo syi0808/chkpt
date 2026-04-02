@@ -299,26 +299,32 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // 8. Build tree bottom-up (skip if nothing changed)
     let snapshot_store = SnapshotStore::new(layout.snapshots_dir());
-    let latest_snapshot = snapshot_store.latest()?;
+    let latest_catalog_snapshot = catalog.latest_snapshot()?;
+    let latest_snapshot = if (new_objects == 0 && removed_paths.is_empty())
+        || latest_catalog_snapshot.is_none()
+    {
+        snapshot_store.latest()?
+    } else {
+        None
+    };
 
-    let (root_tree_hash, _root_tree_hash_hex) = if new_objects == 0 && removed_paths.is_empty() {
+    let root_tree_hash = if new_objects == 0 && removed_paths.is_empty() {
         if let Some(ref snap) = latest_snapshot {
             // Nothing changed — reuse previous tree hash (skip build entirely)
-            (snap.root_tree_hash, String::new())
+            snap.root_tree_hash
         } else {
             let tree_store = TreeStore::new(layout.trees_dir());
             let hex = build_tree(&processed_files, &tree_store)?;
-            (hex_to_bytes(&hex)?, hex)
+            hex_to_bytes(&hex)?
         }
     } else {
         let tree_store = TreeStore::new(layout.trees_dir());
         let hex = build_tree(&processed_files, &tree_store)?;
-        (hex_to_bytes(&hex)?, hex)
+        hex_to_bytes(&hex)?
     };
 
     // 9. Find latest snapshot for parent_snapshot_id (already fetched above)
-    let parent_snapshot_id = catalog
-        .latest_snapshot()?
+    let parent_snapshot_id = latest_catalog_snapshot
         .map(|snapshot| snapshot.id)
         .or_else(|| latest_snapshot.map(|snapshot| snapshot.id));
 
