@@ -424,9 +424,9 @@ fn diff_restore_states(
     target_state: &BTreeMap<String, TargetFileState>,
     current_state: &BTreeMap<String, CurrentFileState>,
 ) -> RestoreDiff {
-    let mut files_to_add = Vec::new();
-    let mut files_to_change = Vec::new();
-    let mut files_to_remove = Vec::new();
+    let mut files_to_add = Vec::with_capacity(target_state.len());
+    let mut files_to_change = Vec::with_capacity(target_state.len().min(current_state.len()));
+    let mut files_to_remove = Vec::with_capacity(current_state.len());
     let mut files_unchanged = 0;
 
     let mut target_iter = target_state.iter().peekable();

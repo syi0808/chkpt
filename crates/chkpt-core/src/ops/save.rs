@@ -725,7 +725,7 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
     // Phase 1: Compute all tree hashes and encoded data in memory
     let mut dir_hashes: BTreeMap<String, String> = BTreeMap::new();
     let mut pack_entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(dir_list.len());
-    let mut known_hashes: HashSet<String> = HashSet::with_capacity(dir_list.len());
+    let mut known_hashes: HashSet<[u8; 32]> = HashSet::with_capacity(dir_list.len());
 
     for dir in &dir_list {
         let file_count = dir_files.get(dir).map(|files| files.len()).unwrap_or(0);
@@ -771,10 +771,12 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
 
         entries.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         let encoded = bitcode::encode(&entries);
-        let hash_hex = blake3::hash(&encoded).to_hex().to_string();
+        let hash = blake3::hash(&encoded);
+        let hash_bytes = *hash.as_bytes();
+        let hash_hex = hash.to_hex().to_string();
 
         dir_hashes.insert(dir.clone(), hash_hex.clone());
-        if known_hashes.insert(hash_hex.clone()) {
+        if known_hashes.insert(hash_bytes) {
             pack_entries.push((hash_hex, encoded));
         }
     }
