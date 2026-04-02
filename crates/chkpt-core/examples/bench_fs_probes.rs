@@ -150,7 +150,8 @@ fn run_iteration(config: BenchConfig) -> Result<BenchResult, Box<dyn std::error:
     )?;
     let remove_missing_exists_then_remove_ms =
         elapsed_ms(|| remove_missing_exists_then_remove(&missing_paths));
-    let remove_missing_direct_remove_ms = elapsed_ms(|| remove_missing_direct_remove(&missing_paths));
+    let remove_missing_direct_remove_ms =
+        elapsed_ms(|| remove_missing_direct_remove(&missing_paths));
 
     Ok(BenchResult {
         read_existing_exists_then_read_ms,

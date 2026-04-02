@@ -13,7 +13,7 @@ chkpt saves workspace state to `~/.chkpt/stores/<project_id>/` without polluting
 
 This plugin provides 4 MCP tools: `checkpoint_save`, `checkpoint_list`, `checkpoint_restore`, `checkpoint_delete`. All tools require a `workspace_path` parameter.
 
-See `references/store-layout.md` for full store structure and snapshot schema.
+See `references/store-layout.md` for the current store structure and inspection recipes.
 See `references/cli-commands.md` for CLI fallback reference.
 See `references/automation-patterns.md` for when to suggest save/restore.
 </context>
@@ -56,12 +56,12 @@ See `references/cli-commands.md` for argument details and output formats.
 
 When the user wants to examine checkpoint internals:
 
-1. Locate the store: find `~/.chkpt/stores/*/config.json` where `project_root` matches the workspace
-2. Read snapshot JSONs directly with the Read tool
-3. Check disk usage, object counts, and pack status via Bash
-4. Compare snapshots by reading their tree hashes and diffing entries
+1. Use `checkpoint_list` first so you know the real snapshot IDs in the current workspace
+2. Inspect candidate stores under `~/.chkpt/stores/*/catalog.sqlite`
+3. Match the workspace store by querying `snapshots` and comparing IDs or timestamps from `checkpoint_list`
+4. Inspect `snapshot_files`, `blob_index`, `objects/`, `packs/`, and `trees/` as needed
 
-See `references/store-layout.md` for directory structure and JSON schemas.
+See `references/store-layout.md` for the current layout and SQLite inspection recipes.
 
 </workflow>
 
@@ -75,6 +75,6 @@ See `references/store-layout.md` for directory structure and JSON schemas.
 
 <references>
 - `references/cli-commands.md` — Complete CLI command reference with arguments, output formats, and error handling
-- `references/store-layout.md` — Store directory structure, snapshot JSON schema, tree node format, and inspection recipes
+- `references/store-layout.md` — Store directory structure, catalog schema, tree node format, and inspection recipes
 - `references/automation-patterns.md` — Rules for when to suggest save/restore and when not to
 </references>

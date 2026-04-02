@@ -1,8 +1,10 @@
 # Performance Storage Redesign Design
 
+> Status: implemented in the current codebase with a catalog-backed metadata path.
+
 ## Goal
 
-Replace the save/restore metadata path with a manifest-driven catalog so `save`, `list`, `restore`, and `delete` no longer depend on tree reconstruction, snapshot JSON directory scans, or pack-file discovery scans.
+Replace the save/restore metadata path with a manifest-driven catalog so `save`, `list`, `restore`, and `delete` no longer depend on snapshot JSON directory scans or eager pack discovery.
 
 ## Constraints
 
@@ -11,13 +13,20 @@ Replace the save/restore metadata path with a manifest-driven catalog so `save`,
 - Risky changes must be protected by tests written first.
 - End-to-end tests are the primary safety net.
 
-## Current Problems
+## Current State
 
-- `save` still scans the workspace, loads the entire file index, and rebuilds the full tree even for warm saves.
-- `restore --dry-run` scans the workspace again and reads changed files fully into memory to hash them.
-- `list`, `latest`, and prefix resolution scale with the number of snapshot JSON files.
-- Pack lookup scales with the number of pack files because packs are opened eagerly.
-- `restore` clears and rebuilds the entire index after apply.
+The implemented design now uses:
+
+- `catalog.sqlite` for snapshot lookup, prefix resolution, manifests, and blob locations
+- `snapshot_files` for flattened manifests
+- `blob_index` for pack-vs-loose blob resolution
+- incremental `FileIndex::apply_changes` updates instead of clear-and-rebuild
+
+The remaining tree path is intentional:
+
+- `root_tree_hash` is still part of the snapshot model
+- save still builds trees for snapshots
+- restore/delete can still fall back to tree traversal when a manifest is unavailable
 
 ## Proposed Design
 
@@ -38,7 +47,7 @@ The existing `FileIndex` remains as the current-workspace cache for metadata equ
 - Stream-hash and compress only changed files.
 - Write new blobs straight to pack files and record them in `blob_index`.
 - Persist the snapshot manifest directly into `snapshot_files`.
-- Remove tree-building from the hot path.
+- Keep tree-building only for `root_tree_hash` continuity.
 
 ### 3. Manifest-driven restore
 
@@ -53,7 +62,7 @@ The existing `FileIndex` remains as the current-workspace cache for metadata equ
 - Delete snapshot metadata and manifest rows from the catalog.
 - Remove unreferenced loose blobs immediately.
 - Remove pack files only when no remaining blobs reference their `pack_hash`.
-- Do not rebuild tree reachability because trees are no longer part of the operational path.
+- Prefer manifest reachability and use tree traversal only as fallback.
 
 ## Testing Strategy
 
@@ -74,6 +83,6 @@ The existing `FileIndex` remains as the current-workspace cache for metadata equ
 
 ## Non-goals
 
-- Migrating old stores
+- Reintroducing snapshot JSON metadata files
+- Reintroducing attachment archives
 - Changing public CLI syntax
-- Rewriting independent `blob`, `tree`, or `snapshot` unit-test fixtures unless needed by the new operational path

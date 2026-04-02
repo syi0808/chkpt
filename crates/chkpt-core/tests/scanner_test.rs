@@ -245,11 +245,19 @@ fn test_parallel_and_sequential_walk_include_symlinks_consistently() {
     let sequential = chkpt_core::scanner::walker::walk(dir.path(), None, false).unwrap();
     let parallel = chkpt_core::scanner::walker::walk_parallel(dir.path(), None, false).unwrap();
 
-    let sequential_paths: Vec<_> = sequential.iter().map(|file| file.relative_path.clone()).collect();
-    let parallel_paths: Vec<_> = parallel.iter().map(|file| file.relative_path.clone()).collect();
+    let sequential_paths: Vec<_> = sequential
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect();
+    let parallel_paths: Vec<_> = parallel
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect();
 
     assert_eq!(sequential_paths, parallel_paths);
-    assert!(sequential.iter().any(|file| file.relative_path == "app.js" && file.is_symlink));
+    assert!(sequential
+        .iter()
+        .any(|file| file.relative_path == "app.js" && file.is_symlink));
 }
 
 #[cfg(unix)]
@@ -264,5 +272,7 @@ fn test_scan_excludes_symlink_named_node_modules_by_default() {
 
     let files = scan_workspace(dir.path(), None).unwrap();
 
-    assert!(!files.iter().any(|file| file.relative_path == "node_modules"));
+    assert!(!files
+        .iter()
+        .any(|file| file.relative_path == "node_modules"));
 }

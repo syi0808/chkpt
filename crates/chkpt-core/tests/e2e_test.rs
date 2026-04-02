@@ -1,8 +1,8 @@
+use chkpt_core::error::ChkpttError;
 use chkpt_core::ops::delete::delete;
 use chkpt_core::ops::list::list;
 use chkpt_core::ops::restore::{restore, RestoreOptions};
 use chkpt_core::ops::save::{save, SaveOptions};
-use chkpt_core::error::ChkpttError;
 use std::fs;
 use tempfile::TempDir;
 
@@ -327,7 +327,9 @@ fn test_e2e_restore_ambiguous_prefix_errors() {
         },
     )
     .unwrap_err();
-    assert!(matches!(err, ChkpttError::Other(message) if message.contains("Ambiguous snapshot prefix")));
+    assert!(
+        matches!(err, ChkpttError::Other(message) if message.contains("Ambiguous snapshot prefix"))
+    );
 }
 
 #[test]
@@ -335,7 +337,11 @@ fn test_e2e_repeated_restore_save_delete_lifecycle() {
     let workspace = TempDir::new().unwrap();
 
     fs::create_dir_all(workspace.path().join("src")).unwrap();
-    fs::write(workspace.path().join("src/main.rs"), "fn main() { println!(\"v1\"); }").unwrap();
+    fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { println!(\"v1\"); }",
+    )
+    .unwrap();
     let first = save(
         workspace.path(),
         SaveOptions {

@@ -11,8 +11,9 @@ chkpt is a fast, content-addressable checkpoint system. One `chkpt save` before 
 - **Content-addressed deduplication** via BLAKE3 hashing. Identical files are stored only once.
 - **zstd compression** for every blob, keeping storage small.
 - **Incremental saves** with a SQLite index that detects only changed files.
+- **Catalog-backed metadata** for fast snapshot lookup, listing, and restore planning.
 - **Atomic restore** that keeps your workspace intact if something fails midway.
-- **Dependency attachments** for optionally including `node_modules` or `.git` history.
+- **Optional dependency scanning** when you want to include `node_modules`, `.venv`, and similar directories.
 - **Multiple interfaces**: CLI, Node.js API, MCP server, and Claude Code plugin.
 
 ## Getting Started
@@ -75,14 +76,11 @@ chkpt restore <id> --dry-run
 chkpt delete <id>
 ```
 
-### Optional Attachments
+### Optional Dependency Inclusion
 
 ```bash
-# Include dependencies (node_modules, etc.)
-chkpt save --with-deps
-
-# Include Git history
-chkpt save --with-git
+# Include dependency directories (node_modules, .venv, etc.)
+chkpt save --include-deps
 ```
 
 ### Claude Code MCP Tools
@@ -107,10 +105,11 @@ Invoke `/chkpt:chkpt` in Claude Code to:
 ```
 Workspace                      ~/.chkpt/stores/
 ┌──────────────┐              ┌──────────────────┐
-│  src/        │   save →     │  blobs/  (zstd)   │
-│  tests/      │              │  trees/  (bincode) │
-│  Cargo.toml  │   ← restore │  snapshots/ (meta) │
-└──────────────┘              │  index.db (SQLite) │
+│  src/        │   save →     │  objects/         │
+│  tests/      │              │  trees/           │
+│  Cargo.toml  │   ← restore │  packs/           │
+└──────────────┘              │  catalog.sqlite   │
+                              │  index.bin        │
                               └──────────────────┘
 ```
 
@@ -118,7 +117,7 @@ Workspace                      ~/.chkpt/stores/
 2. **Hash**: generate a BLAKE3 content hash for each file
 3. **Deduplicate**: skip content already in the store
 4. **Compress & store**: write new content with zstd compression
-5. **Record snapshot**: save tree structure and metadata
+5. **Record snapshot**: persist metadata and manifest in `catalog.sqlite`
 
 ## Project Structure
 
@@ -142,9 +141,6 @@ No. chkpt is for quick, local snapshots, not version control. Think of it as a "
 
 **What files does chkpt ignore?**
 By default, chkpt skips `.git/`, `node_modules/`, and other common build artifacts. You can customize this with a `.chkptignore` file (same syntax as `.gitignore`).
-
-**Are there size limits?**
-Default guardrails allow up to 2 GB total, 100,000 files, and 100 MB per file. These are configurable.
 
 **Does it work on Windows?**
 Yes. Pre-built binaries are available for macOS (arm64, x64), Linux (arm64, x64), and Windows (x64).

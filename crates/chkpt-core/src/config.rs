@@ -1,6 +1,3 @@
-use crate::error::Result;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Generate a 16-hex-char project ID from workspace path.
@@ -37,20 +34,12 @@ impl StoreLayout {
         &self.base
     }
 
-    pub fn config_path(&self) -> PathBuf {
-        self.base.join("config.json")
-    }
-
     pub fn snapshots_dir(&self) -> PathBuf {
         self.base.join("snapshots")
     }
 
     pub fn catalog_path(&self) -> PathBuf {
         self.base.join("catalog.sqlite")
-    }
-
-    pub fn objects_dir(&self) -> PathBuf {
-        self.base.join("objects")
     }
 
     pub fn trees_dir(&self) -> PathBuf {
@@ -77,12 +66,6 @@ impl StoreLayout {
         self.base.join("attachments").join("git")
     }
 
-    /// Object path with 2-char prefix: objects/a3/rest_of_hash
-    pub fn object_path(&self, hash_hex: &str) -> PathBuf {
-        let (prefix, rest) = hash_hex.split_at(2);
-        self.base.join("objects").join(prefix).join(rest)
-    }
-
     /// Tree path with 2-char prefix: trees/a3/rest_of_hash
     pub fn tree_path(&self, hash_hex: &str) -> PathBuf {
         let (prefix, rest) = hash_hex.split_at(2);
@@ -94,7 +77,6 @@ impl StoreLayout {
         for dir in [
             self.base.clone(),
             self.snapshots_dir(),
-            self.objects_dir(),
             self.trees_dir(),
             self.packs_dir(),
             self.locks_dir(),
@@ -115,42 +97,5 @@ impl StoreLayout {
         }
 
         Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Guardrails {
-    pub max_total_bytes: u64,
-    pub max_files: u64,
-    pub max_file_size: u64,
-}
-
-impl Default for Guardrails {
-    fn default() -> Self {
-        Self {
-            max_total_bytes: 2 * 1024 * 1024 * 1024, // 2 GB
-            max_files: 100_000,
-            max_file_size: 100 * 1024 * 1024, // 100 MB
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectConfig {
-    pub project_root: PathBuf,
-    pub created_at: DateTime<Utc>,
-    pub guardrails: Guardrails,
-}
-
-impl ProjectConfig {
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
-        Ok(())
-    }
-
-    pub fn load(path: &Path) -> Result<Self> {
-        let json = std::fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&json)?)
     }
 }

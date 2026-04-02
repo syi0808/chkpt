@@ -1,15 +1,14 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotStats {
     pub total_files: u64,
     pub total_bytes: u64,
     pub new_objects: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Snapshot {
     pub id: String,
     pub created_at: DateTime<Utc>,

@@ -1,7 +1,6 @@
 use crate::error::{ChkpttError, Result};
 use bitcode::{Decode, Encode};
 use memmap2::Mmap;
-use serde::{Deserialize, Serialize};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
@@ -11,14 +10,14 @@ const TREE_PACK_VERSION: u32 = 1;
 const TREE_IDX_ENTRY_SIZE: usize = 32 + 8 + 8; // hash(32) + offset(8) + size(8)
 const TREE_HEADER_SIZE: u64 = 12;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub enum EntryType {
     File,
     Dir,
     Symlink,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct TreeEntry {
     pub name: String,
     pub entry_type: EntryType,

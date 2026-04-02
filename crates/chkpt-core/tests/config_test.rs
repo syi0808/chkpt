@@ -1,6 +1,5 @@
-use chkpt_core::config::{project_id_from_path, Guardrails, ProjectConfig, StoreLayout};
+use chkpt_core::config::{project_id_from_path, StoreLayout};
 use std::path::PathBuf;
-use tempfile::TempDir;
 
 #[test]
 fn test_project_id_deterministic() {
@@ -39,26 +38,4 @@ fn test_store_layout_object_path_has_prefix_dir() {
     // Should be objects/a3/b4c5d6...
     let parent = path.parent().unwrap();
     assert!(parent.ends_with("a3"));
-}
-
-#[test]
-fn test_guardrails_default() {
-    let g = Guardrails::default();
-    assert!(g.max_total_bytes > 0);
-    assert!(g.max_files > 0);
-    assert!(g.max_file_size > 0);
-}
-
-#[test]
-fn test_project_config_roundtrip() {
-    let dir = TempDir::new().unwrap();
-    let config = ProjectConfig {
-        project_root: PathBuf::from("/tmp/test"),
-        created_at: chrono::Utc::now(),
-        guardrails: Guardrails::default(),
-    };
-    let path = dir.path().join("config.json");
-    config.save(&path).unwrap();
-    let loaded = ProjectConfig::load(&path).unwrap();
-    assert_eq!(loaded.project_root, config.project_root);
 }
