@@ -1,7 +1,8 @@
 use crate::error::{ChkpttError, Result};
-use crate::store::blob::{hash_content, BlobStore};
+use crate::store::blob::hash_content;
 use memmap2::Mmap;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::collections::HashMap;
+use std::io::{BufWriter, Cursor, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
@@ -16,6 +17,13 @@ struct IndexEntry {
     hash: [u8; 32],
     offset: u64,
     size: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackLocation {
+    pub(crate) reader_index: usize,
+    pub(crate) offset: u64,
+    pub(crate) size: u64,
 }
 
 pub struct PackWriter {
@@ -47,13 +55,18 @@ impl PackWriter {
 
     pub fn add(&mut self, content: &[u8]) -> Result<String> {
         let hash_hex = hash_content(content);
+        let hash = hex_to_bytes(&hash_hex)?;
         let compressed = zstd::encode_all(content, 1)?;
-        self.add_pre_compressed(hash_hex.clone(), compressed)?;
+        self.add_pre_compressed_bytes(hash, compressed)?;
         Ok(hash_hex)
     }
 
     pub fn add_pre_compressed(&mut self, hash_hex: String, compressed: Vec<u8>) -> Result<()> {
         let hash = hex_to_bytes(&hash_hex)?;
+        self.add_pre_compressed_bytes(hash, compressed)
+    }
+
+    pub fn add_pre_compressed_bytes(&mut self, hash: [u8; 32], compressed: Vec<u8>) -> Result<()> {
         let compressed_len = compressed.len() as u64;
 
         // Write entry to BufWriter: hash(32) + compressed_len(8) + data(N)
@@ -72,7 +85,6 @@ impl PackWriter {
             size: compressed_len,
         });
         self.offset += 32 + 8 + compressed_len;
-
         Ok(())
     }
 
@@ -109,10 +121,10 @@ impl PackWriter {
 
         // Persist .dat file
         let dat_path = self.packs_dir.join(format!("pack-{}.dat", pack_hash));
-        if !dat_path.exists() {
-            dat_tmp
-                .persist(&dat_path)
-                .map_err(|error| ChkpttError::Other(error.error.to_string()))?;
+        if let Err(error) = dat_tmp.persist_noclobber(&dat_path) {
+            if error.error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(ChkpttError::Other(error.error.to_string()));
+            }
         }
 
         // Sort idx entries by hash for binary search
@@ -175,14 +187,13 @@ impl PackReader {
     }
 
     /// Binary search for hash in the mmap'd index.
-    fn find(&self, hash_hex: &str) -> Option<IndexEntry> {
-        let hash_bytes = hex_to_bytes(hash_hex).ok()?;
+    fn find_bytes(&self, hash_bytes: &[u8; 32]) -> Option<IndexEntry> {
         let mut lo = 0usize;
         let mut hi = self.entry_count;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let mid_hash = &self.idx[mid * IDX_ENTRY_SIZE..mid * IDX_ENTRY_SIZE + 32];
-            match mid_hash.cmp(&hash_bytes) {
+            match mid_hash.cmp(&hash_bytes[..]) {
                 std::cmp::Ordering::Equal => return Some(self.idx_entry(mid)),
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
@@ -191,20 +202,39 @@ impl PackReader {
         None
     }
 
-    pub fn contains(&self, hash_hex: &str) -> bool {
-        self.find(hash_hex).is_some()
+    fn find(&self, hash_hex: &str) -> Option<IndexEntry> {
+        let hash_bytes = hex_to_bytes(hash_hex).ok()?;
+        self.find_bytes(&hash_bytes)
+    }
+
+    pub fn contains_bytes(&self, hash: &[u8; 32]) -> bool {
+        self.find_bytes(hash).is_some()
+    }
+
+    fn compressed_bytes(&self, offset: u64, size: u64) -> Option<&[u8]> {
+        let data_start = (offset as usize).checked_add(32 + 8)?; // skip hash + compressed_size
+        let data_end = data_start.checked_add(size as usize)?;
+        if data_end > self.dat.len() {
+            return None;
+        }
+        Some(&self.dat[data_start..data_end])
+    }
+
+    fn copy_at<W: Write>(&self, offset: u64, size: u64, mut writer: W) -> Result<()> {
+        let compressed = self.compressed_bytes(offset, size).ok_or_else(|| {
+            ChkpttError::StoreCorrupted("Pack entry points outside pack data".into())
+        })?;
+        zstd::stream::copy_decode(Cursor::new(compressed), &mut writer)?;
+        Ok(())
     }
 
     /// Read and decompress an object. Returns None if not found.
     pub fn try_read(&self, hash_hex: &str) -> Option<Vec<u8>> {
         let entry = self.find(hash_hex)?;
-        let data_start = entry.offset as usize + 32 + 8; // skip hash + compressed_size
-        let data_end = data_start + entry.size as usize;
-        if data_end > self.dat.len() {
-            return None;
-        }
-        let compressed = &self.dat[data_start..data_end];
-        zstd::decode_all(compressed).ok()
+        let mut decompressed = Vec::new();
+        self.copy_at(entry.offset, entry.size, &mut decompressed)
+            .ok()?;
+        Some(decompressed)
     }
 
     /// Read and decompress an object. Error if not found.
@@ -212,99 +242,122 @@ impl PackReader {
         self.try_read(hash_hex)
             .ok_or_else(|| ChkpttError::ObjectNotFound(hash_hex.to_string()))
     }
-
-    /// List all hashes in this pack.
-    pub fn hashes(&self) -> Vec<String> {
-        (0..self.entry_count)
-            .map(|i| {
-                let entry = self.idx_entry(i);
-                bytes_to_hex(&entry.hash)
-            })
-            .collect()
-    }
 }
 
 pub struct PackSet {
     readers: Vec<PackReader>,
+    reader_indices: HashMap<String, usize>,
 }
 
 impl PackSet {
     pub fn open_all(packs_dir: &Path) -> Result<Self> {
-        let readers = list_packs(packs_dir)?
-            .into_iter()
-            .map(|pack_hash| PackReader::open(packs_dir, &pack_hash))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self { readers })
+        let pack_hashes = list_packs(packs_dir)?;
+        Self::open_selected(packs_dir, &pack_hashes)
+    }
+
+    pub fn open_selected(packs_dir: &Path, pack_hashes: &[String]) -> Result<Self> {
+        let mut readers = Vec::with_capacity(pack_hashes.len());
+        let mut reader_indices = HashMap::with_capacity(pack_hashes.len());
+        for pack_hash in pack_hashes {
+            let reader_index = readers.len();
+            readers.push(PackReader::open(packs_dir, pack_hash)?);
+            reader_indices.insert(pack_hash.clone(), reader_index);
+        }
+        Ok(Self {
+            readers,
+            reader_indices,
+        })
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            readers: Vec::new(),
+            reader_indices: HashMap::new(),
+        }
     }
 
     pub fn try_read(&self, hash_hex: &str) -> Option<Vec<u8>> {
-        self.readers
-            .iter()
-            .find_map(|reader| reader.try_read(hash_hex))
+        let location = self.locate(hash_hex)?;
+        let mut decompressed = Vec::new();
+        self.copy_to_writer(&location, &mut decompressed).ok()?;
+        Some(decompressed)
     }
 
-    pub fn contains(&self, hash_hex: &str) -> bool {
-        self.readers.iter().any(|reader| reader.contains(hash_hex))
+    pub fn contains_bytes(&self, hash: &[u8; 32]) -> bool {
+        self.readers
+            .iter()
+            .any(|reader| reader.contains_bytes(hash))
     }
 
     pub fn read(&self, hash_hex: &str) -> Result<Vec<u8>> {
         self.try_read(hash_hex)
             .ok_or_else(|| ChkpttError::ObjectNotFound(hash_hex.to_string()))
     }
+
+    pub(crate) fn locate(&self, hash_hex: &str) -> Option<PackLocation> {
+        self.readers
+            .iter()
+            .enumerate()
+            .find_map(|(reader_index, reader)| {
+                reader.find(hash_hex).map(|entry| PackLocation {
+                    reader_index,
+                    offset: entry.offset,
+                    size: entry.size,
+                })
+            })
+    }
+
+    pub(crate) fn locate_in_pack_bytes(
+        &self,
+        pack_hash: &str,
+        hash: &[u8; 32],
+    ) -> Option<PackLocation> {
+        let reader_index = *self.reader_indices.get(pack_hash)?;
+        let reader = self.readers.get(reader_index)?;
+        reader.find_bytes(hash).map(|entry| PackLocation {
+            reader_index,
+            offset: entry.offset,
+            size: entry.size,
+        })
+    }
+
+    pub(crate) fn copy_to_writer<W: Write>(
+        &self,
+        location: &PackLocation,
+        writer: W,
+    ) -> Result<()> {
+        let reader = self.readers.get(location.reader_index).ok_or_else(|| {
+            ChkpttError::StoreCorrupted(format!(
+                "Pack reader index {} is out of range",
+                location.reader_index
+            ))
+        })?;
+        reader.copy_at(location.offset, location.size, writer)
+    }
 }
 
 /// List all pack hashes in a directory.
 pub fn list_packs(packs_dir: &Path) -> Result<Vec<String>> {
     let mut packs = Vec::new();
-    if !packs_dir.exists() {
-        return Ok(packs);
-    }
-    for entry in std::fs::read_dir(packs_dir)? {
+    let entries = match std::fs::read_dir(packs_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(packs),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
         let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
         if name.starts_with("pack-") && name.ends_with(".dat") {
             let hash = name
                 .strip_prefix("pack-")
                 .unwrap()
                 .strip_suffix(".dat")
                 .unwrap();
-            packs.push(hash.to_string());
+            packs.push(hash.to_owned());
         }
     }
     Ok(packs)
-}
-
-/// Pack all loose objects from a BlobStore into a pack file, then delete loose objects.
-pub fn pack_loose_objects(blob_store: &BlobStore, packs_dir: &Path) -> Result<String> {
-    let loose = blob_store.list_loose()?;
-    if loose.is_empty() {
-        return Err(ChkpttError::Other("No loose objects to pack".into()));
-    }
-    let mut writer = PackWriter::new(packs_dir)?;
-    for hash in &loose {
-        let content = blob_store.read(hash)?;
-        // Re-compress from raw content
-        writer.add(&content)?;
-    }
-    let pack_hash = writer.finish()?;
-    // Delete loose objects
-    for hash in &loose {
-        blob_store.remove(hash)?;
-    }
-    Ok(pack_hash)
-}
-
-/// Read an object: first check loose, then packs.
-pub fn read_object(blob_store: &BlobStore, packs_dir: &Path, hash_hex: &str) -> Result<Vec<u8>> {
-    // 1. Check loose
-    if blob_store.exists(hash_hex) {
-        return blob_store.read(hash_hex);
-    }
-    read_object_from_pack_set(&PackSet::open_all(packs_dir)?, hash_hex)
-}
-
-pub fn read_object_from_pack_set(pack_set: &PackSet, hash_hex: &str) -> Result<Vec<u8>> {
-    pack_set.read(hash_hex)
 }
 
 fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {
@@ -320,8 +373,4 @@ fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {
             .map_err(|_| ChkpttError::Other("Invalid hex".into()))?;
     }
     Ok(bytes)
-}
-
-fn bytes_to_hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }

@@ -1,4 +1,4 @@
-use chkpt_core::store::blob::{hash_content, BlobStore};
+use chkpt_core::store::blob::hash_content;
 use chkpt_core::store::pack::{PackReader, PackSet, PackWriter};
 use tempfile::TempDir;
 
@@ -62,35 +62,6 @@ fn test_pack_not_found_returns_none() {
 }
 
 #[test]
-fn test_pack_from_loose_objects() {
-    let dir = TempDir::new().unwrap();
-    let objects_dir = dir.path().join("objects");
-    let packs_dir = dir.path().join("packs");
-    std::fs::create_dir_all(&objects_dir).unwrap();
-    std::fs::create_dir_all(&packs_dir).unwrap();
-
-    let blob_store = BlobStore::new(objects_dir.clone());
-    let mut hashes = Vec::new();
-    for i in 0..10 {
-        let h = blob_store.write(format!("file-{}", i).as_bytes()).unwrap();
-        hashes.push(h);
-    }
-
-    // Pack all loose objects
-    let pack_hash = chkpt_core::store::pack::pack_loose_objects(&blob_store, &packs_dir).unwrap();
-
-    // Loose objects should be deleted
-    assert_eq!(blob_store.list_loose().unwrap().len(), 0);
-
-    // All data should be readable from pack
-    let reader = PackReader::open(&packs_dir, &pack_hash).unwrap();
-    for (i, hash) in hashes.iter().enumerate() {
-        let data = reader.read(hash).unwrap();
-        assert_eq!(data, format!("file-{}", i).as_bytes());
-    }
-}
-
-#[test]
 fn test_pack_set_reads_across_multiple_packs() {
     let dir = TempDir::new().unwrap();
     let packs_dir = dir.path().join("packs");
@@ -108,6 +79,26 @@ fn test_pack_set_reads_across_multiple_packs() {
 
     assert_eq!(pack_set.read(&hash_one).unwrap(), b"first-pack");
     assert_eq!(pack_set.read(&hash_two).unwrap(), b"second-pack");
+}
+
+#[test]
+fn test_pack_set_open_selected_limits_visible_packs() {
+    let dir = TempDir::new().unwrap();
+    let packs_dir = dir.path().join("packs");
+    std::fs::create_dir_all(&packs_dir).unwrap();
+
+    let mut writer_one = PackWriter::new(&packs_dir).unwrap();
+    let hash_one = writer_one.add(b"first-pack").unwrap();
+    let pack_one = writer_one.finish().unwrap();
+
+    let mut writer_two = PackWriter::new(&packs_dir).unwrap();
+    let hash_two = writer_two.add(b"second-pack").unwrap();
+    writer_two.finish().unwrap();
+
+    let pack_set = PackSet::open_selected(&packs_dir, &[pack_one]).unwrap();
+
+    assert_eq!(pack_set.read(&hash_one).unwrap(), b"first-pack");
+    assert!(pack_set.try_read(&hash_two).is_none());
 }
 
 #[test]
@@ -151,13 +142,6 @@ fn test_pack_streaming_write_and_read() {
         let read_data = reader.read(hash).unwrap();
         assert_eq!(&read_data, data);
     }
-
-    // Verify hashes list contains all entries
-    let all_hashes = reader.hashes();
-    assert_eq!(all_hashes.len(), 1000);
-    for (hash, _) in &expected {
-        assert!(all_hashes.contains(hash));
-    }
 }
 
 #[test]
@@ -180,20 +164,11 @@ fn test_pack_mmap_reader_large_dataset() {
 
     // Verify every entry can be read back correctly
     for (hash, data) in &expected {
-        assert!(reader.contains(hash));
         let read_data = reader.read(hash).unwrap();
         assert_eq!(&read_data, data);
     }
 
     // Verify non-existent hash returns None
     let fake_hash = "0".repeat(64);
-    assert!(!reader.contains(&fake_hash));
     assert!(reader.try_read(&fake_hash).is_none());
-
-    // Verify hashes list is complete
-    let all_hashes = reader.hashes();
-    assert_eq!(all_hashes.len(), 1000);
-    for (hash, _) in &expected {
-        assert!(all_hashes.contains(hash));
-    }
 }

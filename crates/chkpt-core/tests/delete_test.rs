@@ -1,3 +1,4 @@
+use chkpt_core::config::{project_id_from_path, StoreLayout};
 use chkpt_core::ops::delete::delete;
 use chkpt_core::ops::list::list;
 use chkpt_core::ops::restore::{restore, RestoreOptions};
@@ -73,4 +74,18 @@ fn test_delete_nonexistent() {
     let workspace = TempDir::new().unwrap();
     let result = delete(workspace.path(), "nonexistent-id");
     assert!(result.is_err());
+}
+
+#[test]
+fn test_delete_works_without_snapshot_or_tree_files() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "v1").unwrap();
+    let snapshot = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    fs::remove_dir_all(layout.snapshots_dir()).unwrap();
+    fs::remove_dir_all(layout.trees_dir()).unwrap();
+
+    delete(workspace.path(), &snapshot.snapshot_id).unwrap();
+    assert!(list(workspace.path(), None).unwrap().is_empty());
 }

@@ -8,9 +8,8 @@ license = "Apache-2.0"
 [dependencies]
 blake3 = { workspace = true }
 zstd = { workspace = true }
+rusqlite = { workspace = true }
 tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 uuid = { workspace = true }
@@ -28,6 +27,7 @@ memmap2 = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 rustix = { workspace = true }
+libc = "0.2"
 
 [[bench]]
 name = "save_pipeline"

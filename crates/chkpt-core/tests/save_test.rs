@@ -1,8 +1,9 @@
 use chkpt_core::config::{project_id_from_path, StoreLayout};
 use chkpt_core::index::FileIndex;
 use chkpt_core::ops::save::{save, SaveOptions};
-use chkpt_core::store::blob::BlobStore;
-use chkpt_core::store::pack::pack_loose_objects;
+use chkpt_core::store::blob::hash_content_bytes;
+use chkpt_core::store::catalog::MetadataCatalog;
+use chkpt_core::store::pack::{list_packs, PackReader};
 use std::fs;
 use tempfile::TempDir;
 
@@ -92,14 +93,89 @@ fn test_save_dedups_against_packed_objects() {
     save(workspace.path(), SaveOptions::default()).unwrap();
 
     let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
-    let blob_store = BlobStore::new(layout.objects_dir());
-    if !blob_store.list_loose().unwrap().is_empty() {
-        pack_loose_objects(&blob_store, &layout.packs_dir()).unwrap();
-    }
+    let pack_hashes = list_packs(&layout.packs_dir()).unwrap();
+    assert_eq!(pack_hashes.len(), 1);
+    let reader = PackReader::open(&layout.packs_dir(), &pack_hashes[0]).unwrap();
+    let hash = chkpt_core::store::blob::hash_content(b"same");
+    assert_eq!(reader.read(&hash).unwrap(), b"same");
 
     fs::write(workspace.path().join("b.txt"), "same").unwrap();
     let result = save(workspace.path(), SaveOptions::default()).unwrap();
 
     assert_eq!(result.stats.new_objects, 0);
-    assert_eq!(blob_store.list_loose().unwrap().len(), 0);
+
+    let catalog = MetadataCatalog::open(layout.catalog_path()).unwrap();
+    let location = catalog
+        .blob_location(&hash_content_bytes(b"same"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(location.pack_hash.as_deref(), Some(pack_hashes[0].as_str()));
+}
+
+#[test]
+fn test_save_include_deps_counts_hardlinked_files_without_new_objects_per_link() {
+    let workspace = TempDir::new().unwrap();
+    let pkg_a = workspace.path().join("node_modules/pkg-a");
+    let pkg_b = workspace.path().join("node_modules/pkg-b");
+    fs::create_dir_all(&pkg_a).unwrap();
+    fs::create_dir_all(&pkg_b).unwrap();
+
+    let original = pkg_a.join("index.js");
+    let alias = pkg_b.join("index.js");
+    fs::write(&original, "module.exports = 'same';").unwrap();
+    fs::hard_link(&original, &alias).unwrap();
+
+    let result = save(
+        workspace.path(),
+        SaveOptions {
+            include_deps: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.stats.total_files, 2);
+    assert_eq!(result.stats.new_objects, 1);
+}
+
+#[test]
+fn test_save_persists_catalog() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "same").unwrap();
+
+    let result = save(workspace.path(), SaveOptions::default()).unwrap();
+    assert_eq!(result.stats.total_files, 1);
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    assert!(layout.catalog_path().exists());
+
+    let catalog = MetadataCatalog::open(layout.catalog_path()).unwrap();
+    let manifest = catalog.snapshot_manifest(&result.snapshot_id).unwrap();
+    assert_eq!(manifest.len(), 1);
+}
+
+#[test]
+fn test_save_persists_manifest_for_changed_snapshots() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "v1").unwrap();
+    save(workspace.path(), SaveOptions::default()).unwrap();
+
+    fs::write(workspace.path().join("a.txt"), "v2").unwrap();
+    let result = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    let catalog = MetadataCatalog::open(layout.catalog_path()).unwrap();
+    let manifest = catalog.snapshot_manifest(&result.snapshot_id).unwrap();
+    assert_eq!(manifest.len(), 1);
+}
+
+#[test]
+fn test_save_creates_index_db() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "same").unwrap();
+
+    save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    assert!(layout.index_path().exists());
 }

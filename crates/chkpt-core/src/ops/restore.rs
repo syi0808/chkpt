@@ -4,11 +4,12 @@ use crate::index::FileIndex;
 use crate::ops::io_order::sort_scanned_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
-use crate::store::blob::{hash_file, BlobStore};
-use crate::store::pack::{read_object_from_pack_set, PackSet};
-use crate::store::snapshot::SnapshotStore;
+use crate::store::blob::hash_path_bytes;
+use crate::store::catalog::{ManifestEntry, MetadataCatalog};
+use crate::store::pack::{PackLocation, PackSet};
 use crate::store::tree::{EntryType, TreeStore};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -30,7 +31,13 @@ pub struct RestoreResult {
 }
 
 struct CurrentFileState {
-    hash_hex: String,
+    hash: [u8; 32],
+    is_symlink: bool,
+}
+
+struct TargetFileState {
+    hash: [u8; 32],
+    is_symlink: bool,
 }
 
 struct RestoreDiff {
@@ -40,9 +47,33 @@ struct RestoreDiff {
     files_unchanged: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RestoreSource {
+    Packed(PackLocation),
+}
+
+#[derive(Debug, Clone)]
+struct RestoreTask {
+    path: String,
+    is_symlink: bool,
+    source: RestoreSource,
+}
+
 /// Convert a [u8; 32] to a 64-char hex string.
 fn bytes_to_hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    blake3::Hash::from(*bytes).to_hex().to_string()
+}
+
+fn join_relative_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        return name.to_owned();
+    }
+
+    let mut path = String::with_capacity(prefix.len() + 1 + name.len());
+    path.push_str(prefix);
+    path.push('/');
+    path.push_str(name);
+    path
 }
 
 /// Recursively walk a tree and collect all file entries as (relative_path, blob_hash_hex).
@@ -50,30 +81,52 @@ fn collect_tree_files(
     tree_store: &TreeStore,
     tree_hash_hex: &str,
     prefix: &str,
-    result: &mut BTreeMap<String, String>,
+    result: &mut BTreeMap<String, TargetFileState>,
 ) -> Result<()> {
     let entries = tree_store.read(tree_hash_hex)?;
     for entry in &entries {
-        let path = if prefix.is_empty() {
-            entry.name.clone()
-        } else {
-            format!("{}/{}", prefix, entry.name)
-        };
+        let path = join_relative_path(prefix, &entry.name);
         match entry.entry_type {
             EntryType::File => {
-                let blob_hash_hex = bytes_to_hex(&entry.hash);
-                result.insert(path, blob_hash_hex);
+                result.insert(
+                    path,
+                    TargetFileState {
+                        hash: entry.hash,
+                        is_symlink: false,
+                    },
+                );
             }
             EntryType::Dir => {
                 let subtree_hash_hex = bytes_to_hex(&entry.hash);
                 collect_tree_files(tree_store, &subtree_hash_hex, &path, result)?;
             }
             EntryType::Symlink => {
-                // Symlinks are not restored (consistent with scanner skipping them)
+                result.insert(
+                    path,
+                    TargetFileState {
+                        hash: entry.hash,
+                        is_symlink: true,
+                    },
+                );
             }
         }
     }
     Ok(())
+}
+
+fn target_state_from_manifest(manifest: &[ManifestEntry]) -> BTreeMap<String, TargetFileState> {
+    manifest
+        .iter()
+        .map(|entry| {
+            (
+                entry.path.clone(),
+                TargetFileState {
+                    hash: entry.blob_hash,
+                    is_symlink: mode_is_symlink(entry.mode),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Scan the current workspace to get a mapping of (relative_path -> content_hash_hex).
@@ -83,30 +136,41 @@ fn collect_tree_files(
 fn scan_current_state(
     workspace_root: &Path,
     cached_entries: &HashMap<String, crate::index::FileEntry>,
+    include_deps: bool,
 ) -> Result<BTreeMap<String, CurrentFileState>> {
-    let scanned = crate::scanner::scan_workspace(workspace_root, None)?;
+    let scanned = crate::scanner::scan_workspace_with_options(workspace_root, None, include_deps)?;
     let mut state = BTreeMap::new();
-    let mut stale_files = Vec::new();
+    let mut stale_files = Vec::with_capacity(scanned.len());
 
     for file in scanned {
-        if let Some(hash_hex) = cached_hash_hex(&file, cached_entries) {
-            state.insert(file.relative_path.clone(), CurrentFileState { hash_hex });
+        if let Some(hash) = cached_hash_bytes(&file, cached_entries) {
+            state.insert(
+                file.relative_path.clone(),
+                CurrentFileState {
+                    hash,
+                    is_symlink: file.is_symlink,
+                },
+            );
         } else {
             stale_files.push(file);
         }
     }
 
-    for (file, hash_hex) in hash_scanned_files(stale_files)? {
-        state.insert(file.relative_path.clone(), CurrentFileState { hash_hex });
+    for (file, hash) in hash_scanned_files(stale_files)? {
+        state.insert(
+            file.relative_path.clone(),
+            CurrentFileState {
+                hash,
+                is_symlink: file.is_symlink,
+            },
+        );
     }
     Ok(state)
 }
 
 fn restore_files(
     workspace_root: &Path,
-    restore_tasks: &[(String, String)],
-    blob_store: &BlobStore,
-    has_loose_objects: bool,
+    restore_tasks: &[RestoreTask],
     pack_set: &PackSet,
     progress: &ProgressCallback,
     progress_counter: &AtomicU64,
@@ -122,17 +186,8 @@ fn restore_files(
         .min(restore_tasks.len());
     if worker_count <= 1 {
         let mut restored = Vec::with_capacity(restore_tasks.len());
-        for (path, blob_hash_hex) in restore_tasks {
-            let content = if has_loose_objects && blob_store.exists(blob_hash_hex) {
-                blob_store.read(blob_hash_hex)?
-            } else {
-                read_object_from_pack_set(pack_set, blob_hash_hex)?
-            };
-            let file_path = workspace_root.join(path);
-            if let Some(parent) = file_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&file_path, &content)?;
+        for task in restore_tasks {
+            restore_file(workspace_root, task, pack_set)?;
             let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
             emit(
                 progress,
@@ -141,7 +196,7 @@ fn restore_files(
                     total: restore_total,
                 },
             );
-            restored.push(path.clone());
+            restored.push(task.path.clone());
         }
         return Ok(restored);
     }
@@ -153,17 +208,8 @@ fn restore_files(
             .map(|chunk| {
                 scope.spawn(move || -> Result<Vec<String>> {
                     let mut restored = Vec::with_capacity(chunk.len());
-                    for (path, blob_hash_hex) in chunk {
-                        let content = if has_loose_objects && blob_store.exists(blob_hash_hex) {
-                            blob_store.read(blob_hash_hex)?
-                        } else {
-                            read_object_from_pack_set(pack_set, blob_hash_hex)?
-                        };
-                        let file_path = workspace_root.join(path);
-                        if let Some(parent) = file_path.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        std::fs::write(&file_path, &content)?;
+                    for task in chunk {
+                        restore_file(workspace_root, task, pack_set)?;
                         let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
                         emit(
                             progress,
@@ -172,7 +218,7 @@ fn restore_files(
                                 total: restore_total,
                             },
                         );
-                        restored.push(path.clone());
+                        restored.push(task.path.clone());
                     }
                     Ok(restored)
                 })
@@ -190,13 +236,155 @@ fn restore_files(
     })
 }
 
+fn restore_file(workspace_root: &Path, task: &RestoreTask, pack_set: &PackSet) -> Result<()> {
+    let file_path = workspace_root.join(&task.path);
+    if let Some(parent) = file_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    if let Ok(metadata) = std::fs::symlink_metadata(&file_path) {
+        if metadata.file_type().is_symlink() || task.is_symlink {
+            std::fs::remove_file(&file_path)?;
+        }
+    }
+
+    match task.source {
+        RestoreSource::Packed(location) => {
+            if task.is_symlink {
+                let mut content = Vec::new();
+                pack_set.copy_to_writer(&location, &mut content)?;
+                restore_symlink(&file_path, &content)?;
+            } else {
+                let file = std::fs::File::create(&file_path)?;
+                let mut writer = BufWriter::with_capacity(256 * 1024, file);
+                pack_set.copy_to_writer(&location, &mut writer)?;
+                writer.flush()?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn restore_symlink(path: &Path, target_bytes: &[u8]) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let target = std::ffi::OsStr::from_bytes(target_bytes);
+    std::os::unix::fs::symlink(target, path)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restore_symlink(_path: &Path, _target_bytes: &[u8]) -> Result<()> {
+    Err(ChkpttError::RestoreFailed(
+        "symlink restore is only supported on unix platforms".into(),
+    ))
+}
+
+fn resolve_restore_sources(
+    files_to_add: &[String],
+    files_to_change: &[String],
+    target_state: &BTreeMap<String, TargetFileState>,
+    catalog: &MetadataCatalog,
+    packs_dir: &Path,
+) -> Result<(PackSet, HashMap<[u8; 32], RestoreSource>)> {
+    let candidate_count = files_to_add.len() + files_to_change.len();
+    let mut sources = HashMap::with_capacity(candidate_count);
+    let mut seen_hashes = HashSet::with_capacity(candidate_count);
+    let mut packed_hashes = Vec::with_capacity(candidate_count);
+
+    for path in files_to_add.iter().chain(files_to_change.iter()) {
+        let target = target_state
+            .get(path)
+            .expect("target hash missing for restore source");
+        if !seen_hashes.insert(target.hash) {
+            continue;
+        }
+        packed_hashes.push(target.hash);
+    }
+
+    if packed_hashes.is_empty() {
+        return Ok((PackSet::empty(), sources));
+    }
+
+    let blob_locations = catalog.blob_locations_for_hashes(&packed_hashes)?;
+    let mut selected_pack_hashes = HashSet::with_capacity(packed_hashes.len());
+    for hash in &packed_hashes {
+        let location = blob_locations
+            .get(hash)
+            .ok_or_else(|| ChkpttError::ObjectNotFound(bytes_to_hex(hash)))?;
+        let pack_hash = location.pack_hash.as_ref().ok_or_else(|| {
+            ChkpttError::StoreCorrupted(format!(
+                "blob {} is not stored in a pack",
+                bytes_to_hex(hash)
+            ))
+        })?;
+        selected_pack_hashes.insert(pack_hash.clone());
+    }
+
+    let mut pack_hashes: Vec<_> = selected_pack_hashes.into_iter().collect();
+    pack_hashes.sort_unstable();
+    let pack_set = PackSet::open_selected(packs_dir, &pack_hashes)?;
+
+    for hash in packed_hashes {
+        let pack_hash = blob_locations
+            .get(&hash)
+            .and_then(|location| location.pack_hash.as_ref())
+            .expect("pack hash missing after validation");
+        let location = pack_set
+            .locate_in_pack_bytes(pack_hash, &hash)
+            .ok_or_else(|| ChkpttError::ObjectNotFound(bytes_to_hex(&hash)))?;
+        sources.insert(hash, RestoreSource::Packed(location));
+    }
+
+    Ok((pack_set, sources))
+}
+
+fn build_restore_tasks(
+    files_to_add: &[String],
+    files_to_change: &[String],
+    target_state: &BTreeMap<String, TargetFileState>,
+    restore_sources: &HashMap<[u8; 32], RestoreSource>,
+) -> Result<Vec<RestoreTask>> {
+    let mut tasks = Vec::with_capacity(files_to_add.len() + files_to_change.len());
+
+    for path in files_to_add.iter().chain(files_to_change.iter()) {
+        let target = target_state
+            .get(path)
+            .expect("target hash missing for restore task");
+        let source = *restore_sources
+            .get(&target.hash)
+            .ok_or_else(|| ChkpttError::ObjectNotFound(bytes_to_hex(&target.hash)))?;
+
+        tasks.push(RestoreTask {
+            path: path.clone(),
+            is_symlink: target.is_symlink,
+            source,
+        });
+    }
+
+    tasks.sort_unstable_by(|left, right| match (&left.source, &right.source) {
+        (RestoreSource::Packed(left_location), RestoreSource::Packed(right_location)) => (
+            left_location.reader_index,
+            left_location.offset,
+            left.path.as_str(),
+        )
+            .cmp(&(
+                right_location.reader_index,
+                right_location.offset,
+                right.path.as_str(),
+            )),
+    });
+    Ok(tasks)
+}
+
 fn diff_restore_states(
-    target_state: &BTreeMap<String, String>,
+    target_state: &BTreeMap<String, TargetFileState>,
     current_state: &BTreeMap<String, CurrentFileState>,
 ) -> RestoreDiff {
-    let mut files_to_add = Vec::new();
-    let mut files_to_change = Vec::new();
-    let mut files_to_remove = Vec::new();
+    let mut files_to_add = Vec::with_capacity(target_state.len());
+    let mut files_to_change = Vec::with_capacity(target_state.len().min(current_state.len()));
+    let mut files_to_remove = Vec::with_capacity(current_state.len());
     let mut files_unchanged = 0;
 
     let mut target_iter = target_state.iter().peekable();
@@ -204,7 +392,7 @@ fn diff_restore_states(
 
     loop {
         match (target_iter.peek(), current_iter.peek()) {
-            (Some((target_path, target_hash)), Some((current_path, current_file))) => {
+            (Some((target_path, target_file)), Some((current_path, current_file))) => {
                 match target_path.cmp(current_path) {
                     std::cmp::Ordering::Less => {
                         files_to_add.push((*target_path).clone());
@@ -215,7 +403,9 @@ fn diff_restore_states(
                         current_iter.next();
                     }
                     std::cmp::Ordering::Equal => {
-                        if target_hash.as_str() != current_file.hash_hex {
+                        if target_file.hash != current_file.hash
+                            || target_file.is_symlink != current_file.is_symlink
+                        {
                             files_to_change.push((*target_path).clone());
                         } else {
                             files_unchanged += 1;
@@ -264,54 +454,39 @@ pub fn restore(
 
     // 2. Acquire project lock
     let _lock = ProjectLock::acquire(&layout.locks_dir())?;
+    let catalog = MetadataCatalog::open(layout.catalog_path())?;
 
     // 3. Resolve snapshot ID
-    let snapshot_store = SnapshotStore::new(layout.snapshots_dir());
-    let resolved_snapshot = if snapshot_id == "latest" {
-        snapshot_store
-            .latest()?
-            .ok_or_else(|| ChkpttError::SnapshotNotFound("latest (no snapshots exist)".into()))?
-    } else {
-        // Try exact match first
-        match snapshot_store.load(snapshot_id) {
-            Ok(snap) => snap,
-            Err(ChkpttError::SnapshotNotFound(_)) => {
-                // Try prefix match
-                let all_ids = snapshot_store.all_ids()?;
-                let matches: Vec<_> = all_ids
-                    .iter()
-                    .filter(|id| id.starts_with(snapshot_id))
-                    .collect();
-                match matches.len() {
-                    0 => {
-                        return Err(ChkpttError::SnapshotNotFound(snapshot_id.to_string()));
-                    }
-                    1 => snapshot_store.load(matches[0])?,
-                    _ => {
-                        return Err(ChkpttError::Other(format!(
-                            "Ambiguous snapshot prefix '{}': matches {} snapshots",
-                            snapshot_id,
-                            matches.len()
-                        )));
-                    }
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    };
-
+    let resolved_snapshot = catalog.resolve_snapshot_ref(snapshot_id)?;
     let resolved_id = resolved_snapshot.id.clone();
 
     // 4. Load snapshot's tree to get target state (path -> blob_hash_hex)
-    let tree_store = TreeStore::new(layout.trees_dir());
-    let root_tree_hash_hex = bytes_to_hex(&resolved_snapshot.root_tree_hash);
-    let mut target_state: BTreeMap<String, String> = BTreeMap::new();
-    collect_tree_files(&tree_store, &root_tree_hash_hex, "", &mut target_state)?;
+    let manifest = catalog.snapshot_manifest(&resolved_id)?;
+    let target_state = if resolved_snapshot.stats.total_files == 0 {
+        BTreeMap::new()
+    } else if manifest.is_empty() {
+        let tree_store = TreeStore::new(layout.trees_dir());
+        let root_tree_hash = resolved_snapshot.root_tree_hash.ok_or_else(|| {
+            ChkpttError::StoreCorrupted(format!(
+                "snapshot '{}' is missing both manifest entries and root_tree_hash",
+                resolved_id
+            ))
+        })?;
+        let root_tree_hash_hex = bytes_to_hex(&root_tree_hash);
+        let mut state = BTreeMap::new();
+        collect_tree_files(&tree_store, &root_tree_hash_hex, "", &mut state)?;
+        state
+    } else {
+        target_state_from_manifest(&manifest)
+    };
+    let target_includes_deps = target_state
+        .keys()
+        .any(|path| path_contains_dependency_dir(path));
 
     // 5. Scan current workspace to get current state (path -> content_hash_hex)
     let mut index = FileIndex::open(layout.index_path())?;
-    let cached_entries = index.entries_by_path()?;
-    let current_state = scan_current_state(workspace_root, &cached_entries)?;
+    let cached_entries = index.entries();
+    let current_state = scan_current_state(workspace_root, &cached_entries, target_includes_deps)?;
     emit(
         &options.progress,
         ProgressEvent::ScanCurrentComplete {
@@ -340,10 +515,14 @@ pub fn restore(
     }
 
     // 8. Perform actual restore
-    let blob_store = BlobStore::new(layout.objects_dir());
-    let has_loose_objects = blob_store_has_loose_objects(&layout.objects_dir())?;
     let packs_dir = layout.packs_dir();
-    let pack_set = PackSet::open_all(&packs_dir)?;
+    let (pack_set, restore_sources) = resolve_restore_sources(
+        &files_to_add,
+        &files_to_change,
+        &target_state,
+        &catalog,
+        &packs_dir,
+    )?;
 
     let restore_total = (files_to_add.len() + files_to_change.len() + files_to_remove.len()) as u64;
     emit(
@@ -356,25 +535,16 @@ pub fn restore(
     );
 
     // 8a. Restore files that need to be added or changed (parallel)
-    let restore_tasks: Vec<(String, String)> = files_to_add
-        .iter()
-        .chain(files_to_change.iter())
-        .map(|path| {
-            (
-                path.clone(),
-                target_state
-                    .get(path)
-                    .expect("target hash missing for restore task")
-                    .clone(),
-            )
-        })
-        .collect();
+    let restore_tasks = build_restore_tasks(
+        &files_to_add,
+        &files_to_change,
+        &target_state,
+        &restore_sources,
+    )?;
     let restore_progress = AtomicU64::new(0);
     let restored_paths = restore_files(
         workspace_root,
         &restore_tasks,
-        &blob_store,
-        has_loose_objects,
         &pack_set,
         &options.progress,
         &restore_progress,
@@ -384,8 +554,10 @@ pub fn restore(
     // 8b. Remove files that are not in the target snapshot
     for path in &files_to_remove {
         let file_path = workspace_root.join(path);
-        if file_path.exists() {
-            std::fs::remove_file(&file_path)?;
+        match std::fs::remove_file(&file_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         let completed = restore_progress.fetch_add(1, Ordering::Relaxed) + 1;
         emit(
@@ -397,8 +569,8 @@ pub fn restore(
         );
     }
 
-    // 8c. Clean up empty directories
-    cleanup_empty_dirs(workspace_root)?;
+    // 8c. Clean up empty directories affected by removed files only.
+    cleanup_removed_file_parents(workspace_root, &files_to_remove)?;
 
     let file_entries = restored_index_entries(workspace_root, &restored_paths, &target_state)?;
     index.apply_changes(&files_to_remove, &file_entries)?;
@@ -406,34 +578,43 @@ pub fn restore(
     Ok(result)
 }
 
-/// Convert a 64-char hex string to a [u8; 32] array.
-fn hex_to_bytes(hex: &str) -> [u8; 32] {
-    let mut bytes = [0u8; 32];
-    for i in 0..32 {
-        if let Ok(b) = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
-            bytes[i] = b;
-        }
-    }
-    bytes
+fn path_contains_dependency_dir(relative_path: &str) -> bool {
+    relative_path.split('/').any(|component| {
+        matches!(
+            component,
+            "node_modules"
+                | ".venv"
+                | "venv"
+                | "__pypackages__"
+                | ".tox"
+                | ".nox"
+                | ".gradle"
+                | ".m2"
+        )
+    })
+}
+
+fn mode_is_symlink(mode: u32) -> bool {
+    (mode & 0o170000) == 0o120000
 }
 
 fn restored_index_entries(
     workspace_root: &Path,
     restored_paths: &[String],
-    target_state: &BTreeMap<String, String>,
+    target_state: &BTreeMap<String, TargetFileState>,
 ) -> Result<Vec<crate::index::FileEntry>> {
     let mut file_entries = Vec::with_capacity(restored_paths.len());
     for path in restored_paths {
         let absolute_path = workspace_root.join(path);
-        let metadata = std::fs::metadata(&absolute_path)?;
-        let hash_hex = target_state.get(path).ok_or_else(|| {
+        let metadata = std::fs::symlink_metadata(&absolute_path)?;
+        let target = target_state.get(path).ok_or_else(|| {
             ChkpttError::RestoreFailed(format!("Missing target hash for {}", path))
         })?;
         let scanned = scanned_file_from_metadata(path.clone(), absolute_path, &metadata);
 
         file_entries.push(crate::index::FileEntry {
             path: scanned.relative_path,
-            blob_hash: hex_to_bytes(hash_hex),
+            blob_hash: target.hash,
             size: scanned.size,
             mtime_secs: scanned.mtime_secs,
             mtime_nanos: scanned.mtime_nanos,
@@ -444,23 +625,24 @@ fn restored_index_entries(
     Ok(file_entries)
 }
 
-fn cached_hash_hex(
+fn cached_hash_bytes(
     file: &ScannedFile,
     cached_entries: &HashMap<String, crate::index::FileEntry>,
-) -> Option<String> {
+) -> Option<[u8; 32]> {
     let cached = cached_entries.get(&file.relative_path)?;
     if cached.mtime_secs == file.mtime_secs
         && cached.mtime_nanos == file.mtime_nanos
         && cached.size == file.size
         && cached.inode == file.inode
+        && cached.mode == file.mode
     {
-        Some(bytes_to_hex(&cached.blob_hash))
+        Some(cached.blob_hash)
     } else {
         None
     }
 }
 
-fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFile, String)>> {
+fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFile, [u8; 32])>> {
     if scanned_files.is_empty() {
         return Ok(Vec::new());
     }
@@ -474,20 +656,32 @@ fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFil
     if worker_count <= 1 {
         return scanned_files
             .into_iter()
-            .map(|file| Ok((file.clone(), hash_file(&file.absolute_path)?)))
+            .map(|file| {
+                Ok((
+                    file.clone(),
+                    hash_path_bytes(&file.absolute_path, file.is_symlink)?,
+                ))
+            })
             .collect();
     }
 
     let chunk_size = scanned_files.len().div_ceil(worker_count);
     std::thread::scope(|scope| {
-        let mut workers = Vec::new();
+        let mut workers = Vec::with_capacity(scanned_files.len().div_ceil(chunk_size));
         for chunk in scanned_files.chunks(chunk_size) {
-            workers.push(scope.spawn(move || -> Result<Vec<(ScannedFile, String)>> {
-                chunk
-                    .iter()
-                    .map(|file| Ok((file.clone(), hash_file(&file.absolute_path)?)))
-                    .collect()
-            }));
+            workers.push(
+                scope.spawn(move || -> Result<Vec<(ScannedFile, [u8; 32])>> {
+                    chunk
+                        .iter()
+                        .map(|file| {
+                            Ok((
+                                file.clone(),
+                                hash_path_bytes(&file.absolute_path, file.is_symlink)?,
+                            ))
+                        })
+                        .collect()
+                }),
+            );
         }
 
         let mut hashed = Vec::with_capacity(scanned_files.len());
@@ -515,8 +709,10 @@ fn scanned_file_from_metadata(
         size: metadata.len(),
         mtime_secs: metadata.mtime(),
         mtime_nanos: metadata.mtime_nsec(),
+        device: Some(metadata.dev()),
         inode: Some(metadata.ino()),
         mode: metadata.mode(),
+        is_symlink: metadata.file_type().is_symlink(),
     }
 }
 
@@ -535,62 +731,56 @@ fn scanned_file_from_metadata(
         .map(|duration| (duration.as_secs() as i64, duration.subsec_nanos() as i64))
         .unwrap_or((0, 0));
 
+    let is_symlink = metadata.file_type().is_symlink();
     ScannedFile {
         relative_path,
         absolute_path,
         size: metadata.len(),
         mtime_secs,
         mtime_nanos,
+        device: None,
         inode: None,
-        mode: 0o644,
+        mode: if is_symlink { 0o120000 } else { 0o644 },
+        is_symlink,
     }
 }
 
-/// Recursively remove empty directories under root (but not root itself).
-fn cleanup_empty_dirs(root: &Path) -> Result<()> {
-    cleanup_empty_dirs_recursive(root, root)
-}
-
-fn blob_store_has_loose_objects(objects_dir: &Path) -> Result<bool> {
-    if !objects_dir.exists() {
-        return Ok(false);
-    }
-    for prefix_entry in std::fs::read_dir(objects_dir)? {
-        let prefix_entry = prefix_entry?;
-        if !prefix_entry.file_type()?.is_dir() {
-            continue;
-        }
-        for object_entry in std::fs::read_dir(prefix_entry.path())? {
-            let object_entry = object_entry?;
-            if object_entry.file_type()?.is_file()
-                && !object_entry.file_name().to_string_lossy().ends_with(".tmp")
-            {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
-fn cleanup_empty_dirs_recursive(root: &Path, dir: &Path) -> Result<()> {
-    if !dir.is_dir() {
+fn cleanup_removed_file_parents(root: &Path, removed_paths: &[String]) -> Result<()> {
+    if removed_paths.is_empty() {
         return Ok(());
     }
 
-    // First recurse into subdirectories
-    let entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
-
-    for entry in &entries {
-        if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-            cleanup_empty_dirs_recursive(root, &entry.path())?;
+    let mut candidates = HashSet::with_capacity(removed_paths.len());
+    for removed_path in removed_paths {
+        let mut current = root.join(removed_path);
+        while let Some(parent) = current.parent() {
+            if parent == root {
+                candidates.insert(parent.to_path_buf());
+                break;
+            }
+            if !parent.starts_with(root) {
+                break;
+            }
+            candidates.insert(parent.to_path_buf());
+            current = parent.to_path_buf();
         }
     }
 
-    // After recursing, check if directory is now empty (and it's not the root)
-    if dir != root {
-        let remaining: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
-        if remaining.is_empty() {
-            std::fs::remove_dir(dir)?;
+    let mut candidates: Vec<_> = candidates.into_iter().filter(|dir| dir != root).collect();
+    candidates.sort_unstable_by(|left, right| {
+        right
+            .components()
+            .count()
+            .cmp(&left.components().count())
+            .then_with(|| left.cmp(right))
+    });
+
+    for dir in candidates {
+        match std::fs::remove_dir(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+            Err(error) => return Err(error.into()),
         }
     }
 
@@ -603,46 +793,87 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_blob_store_has_loose_objects_false_for_empty_store() {
+    fn test_cleanup_removed_file_parents_removes_only_empty_ancestor_chain() {
         let dir = TempDir::new().unwrap();
-        let objects_dir = dir.path().join("objects");
-        std::fs::create_dir_all(&objects_dir).unwrap();
-        assert!(!blob_store_has_loose_objects(&objects_dir).unwrap());
+        let root = dir.path();
+
+        let empty_leaf = root.join("a/b/c");
+        std::fs::create_dir_all(&empty_leaf).unwrap();
+        std::fs::write(empty_leaf.join("gone.txt"), b"gone").unwrap();
+        std::fs::remove_file(empty_leaf.join("gone.txt")).unwrap();
+
+        let non_empty_leaf = root.join("a/keep");
+        std::fs::create_dir_all(&non_empty_leaf).unwrap();
+        std::fs::write(non_empty_leaf.join("keep.txt"), b"keep").unwrap();
+
+        cleanup_removed_file_parents(root, &[String::from("a/b/c/gone.txt")]).unwrap();
+
+        assert!(!root.join("a/b/c").exists());
+        assert!(!root.join("a/b").exists());
+        assert!(root.join("a").exists());
+        assert!(root.join("a/keep/keep.txt").exists());
     }
 
     #[test]
-    fn test_blob_store_has_loose_objects_true_when_file_exists() {
+    fn test_cleanup_removed_file_parents_skips_non_empty_directories() {
         let dir = TempDir::new().unwrap();
-        let objects_dir = dir.path().join("objects");
-        std::fs::create_dir_all(objects_dir.join("aa")).unwrap();
-        std::fs::write(objects_dir.join("aa").join("bb"), b"data").unwrap();
-        assert!(blob_store_has_loose_objects(&objects_dir).unwrap());
+        let root = dir.path();
+
+        let shared = root.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("still-here.txt"), b"keep").unwrap();
+
+        cleanup_removed_file_parents(root, &[String::from("shared/gone.txt")]).unwrap();
+
+        assert!(root.join("shared").exists());
+        assert!(root.join("shared/still-here.txt").exists());
     }
 
     #[test]
     fn test_diff_restore_states_classifies_paths() {
         let target_state = BTreeMap::from([
-            ("a.txt".to_string(), "hash-a".to_string()),
-            ("b.txt".to_string(), "hash-b-target".to_string()),
-            ("c.txt".to_string(), "hash-c".to_string()),
+            (
+                "a.txt".to_string(),
+                TargetFileState {
+                    hash: hash_bytes("hash-a"),
+                    is_symlink: false,
+                },
+            ),
+            (
+                "b.txt".to_string(),
+                TargetFileState {
+                    hash: hash_bytes("hash-b-target"),
+                    is_symlink: true,
+                },
+            ),
+            (
+                "c.txt".to_string(),
+                TargetFileState {
+                    hash: hash_bytes("hash-c"),
+                    is_symlink: false,
+                },
+            ),
         ]);
         let current_state = BTreeMap::from([
             (
                 "b.txt".to_string(),
                 CurrentFileState {
-                    hash_hex: "hash-b-current".to_string(),
+                    hash: hash_bytes("hash-b-current"),
+                    is_symlink: false,
                 },
             ),
             (
                 "c.txt".to_string(),
                 CurrentFileState {
-                    hash_hex: "hash-c".to_string(),
+                    hash: hash_bytes("hash-c"),
+                    is_symlink: false,
                 },
             ),
             (
                 "d.txt".to_string(),
                 CurrentFileState {
-                    hash_hex: "hash-d".to_string(),
+                    hash: hash_bytes("hash-d"),
+                    is_symlink: false,
                 },
             ),
         ]);
@@ -656,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_diff_restore_states_handles_empty_inputs() {
-        let target_state: BTreeMap<String, String> = BTreeMap::new();
+        let target_state: BTreeMap<String, TargetFileState> = BTreeMap::new();
         let current_state: BTreeMap<String, CurrentFileState> = BTreeMap::new();
         let diff = diff_restore_states(&target_state, &current_state);
 
@@ -664,5 +895,30 @@ mod tests {
         assert!(diff.files_to_change.is_empty());
         assert!(diff.files_to_remove.is_empty());
         assert_eq!(diff.files_unchanged, 0);
+    }
+
+    #[test]
+    fn test_diff_restore_states_detects_type_changes() {
+        let target_state = BTreeMap::from([(
+            "link".to_string(),
+            TargetFileState {
+                hash: hash_bytes("same-hash"),
+                is_symlink: true,
+            },
+        )]);
+        let current_state = BTreeMap::from([(
+            "link".to_string(),
+            CurrentFileState {
+                hash: hash_bytes("same-hash"),
+                is_symlink: false,
+            },
+        )]);
+
+        let diff = diff_restore_states(&target_state, &current_state);
+        assert_eq!(diff.files_to_change, vec!["link".to_string()]);
+    }
+
+    fn hash_bytes(label: &str) -> [u8; 32] {
+        *blake3::hash(label.as_bytes()).as_bytes()
     }
 }

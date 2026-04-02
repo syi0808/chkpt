@@ -22,21 +22,24 @@ pub struct FileIndex {
 impl FileIndex {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let entries = if path.exists() {
-            let data = std::fs::read(&path)?;
-            let entries_vec: Vec<FileEntry> = bitcode::decode(&data)?;
-            entries_vec
-                .into_iter()
-                .map(|e| (e.path.clone(), e))
-                .collect()
-        } else {
-            HashMap::new()
+        let entries = match std::fs::read(&path) {
+            Ok(data) => {
+                let entries_vec: Vec<FileEntry> = bitcode::decode(&data)?;
+                let mut entries = HashMap::with_capacity(entries_vec.len());
+                for entry in entries_vec {
+                    entries.insert(entry.path.clone(), entry);
+                }
+                entries
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => return Err(error.into()),
         };
         Ok(Self { path, entries })
     }
 
     fn flush(&self) -> Result<()> {
-        let entries_vec: Vec<FileEntry> = self.entries.values().cloned().collect();
+        let mut entries_vec = Vec::with_capacity(self.entries.len());
+        entries_vec.extend(self.entries.values().cloned());
         let encoded = bitcode::encode(&entries_vec);
         let tmp_path = self.path.with_extension("bin.tmp");
         std::fs::write(&tmp_path, &encoded)?;
@@ -89,6 +92,10 @@ impl FileIndex {
 
     pub fn all_entries(&self) -> Result<Vec<FileEntry>> {
         Ok(self.entries.values().cloned().collect())
+    }
+
+    pub fn entries(&self) -> &HashMap<String, FileEntry> {
+        &self.entries
     }
 
     pub fn entries_by_path(&self) -> Result<HashMap<String, FileEntry>> {

@@ -10,6 +10,7 @@ use chkpt_core::store::pack::PackWriter;
 use chkpt_core::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
+use std::mem::MaybeUninit;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -165,7 +166,7 @@ fn main() {
     let layout = StoreLayout::new(&project_id);
     let t = Instant::now();
     let index = FileIndex::open(layout.index_path()).unwrap();
-    let cached_entries = index.entries_by_path().unwrap();
+    let cached_entries = index.entries();
     let index_load_ms = t.elapsed().as_millis();
 
     let t = Instant::now();
@@ -522,6 +523,9 @@ fn main() {
         pct(combined_ms, baseline_ms)
     );
     println!("╚══════════════════════════════════════════════════╝");
+    if let Some(peak_rss_kb) = peak_rss_kb() {
+        println!("peak_rss_kb={peak_rss_kb}");
+    }
 }
 
 fn pct(new: u128, old: u128) -> f64 {
@@ -551,4 +555,29 @@ fn register_dir_hierarchy(
         }
         parent = current;
     }
+}
+
+#[cfg(unix)]
+fn peak_rss_kb() -> Option<u64> {
+    let mut usage = MaybeUninit::<libc::rusage>::uninit();
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    let usage = unsafe { usage.assume_init() };
+
+    #[cfg(target_os = "macos")]
+    {
+        Some((usage.ru_maxrss as u64).div_ceil(1024))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(usage.ru_maxrss as u64)
+    }
+}
+
+#[cfg(not(unix))]
+fn peak_rss_kb() -> Option<u64> {
+    None
 }

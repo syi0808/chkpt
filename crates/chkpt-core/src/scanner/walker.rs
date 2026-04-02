@@ -31,13 +31,12 @@ pub fn walk(
         let Some(file_type) = entry.file_type() else {
             continue;
         };
-        if !file_type.is_file() {
+        if !file_type.is_file() && !file_type.is_symlink() {
             continue;
         }
 
         let relative = relative_path(root, path);
-        let metadata = entry
-            .metadata()
+        let metadata = std::fs::symlink_metadata(path)
             .map_err(|error| ChkpttError::Other(error.to_string()))?;
         files.push(build_scanned_file(path, &relative, &metadata));
     }
@@ -78,7 +77,7 @@ pub fn walk_parallel(
         return Err(error);
     }
 
-    let mut files = files.lock().unwrap().clone();
+    let mut files = std::mem::take(&mut *files.lock().unwrap());
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(files)
 }
@@ -118,6 +117,9 @@ fn build_walk_builder(root: &Path, matcher: Arc<IgnoreMatcher>) -> WalkBuilder {
             let relative = relative_path(filter_root.as_path(), path);
             if file_type.is_dir() {
                 !filter_matcher.is_ignored(&relative, true)
+            } else if file_type.is_symlink() {
+                !filter_matcher.is_ignored(&relative, false)
+                    && !filter_matcher.is_ignored(&relative, true)
             } else if file_type.is_file() {
                 !filter_matcher.is_ignored(&relative, false)
             } else {
@@ -202,7 +204,7 @@ impl ParallelVisitor for CollectVisitor {
             return WalkState::Continue;
         };
 
-        if !file_type.is_file() {
+        if !file_type.is_file() && !file_type.is_symlink() {
             return WalkState::Continue;
         }
 
@@ -235,8 +237,10 @@ fn build_scanned_file(
         size: metadata.len(),
         mtime_secs: metadata.mtime(),
         mtime_nanos: metadata.mtime_nsec(),
+        device: Some(metadata.dev()),
         inode: Some(metadata.ino()),
         mode: metadata.mode(),
+        is_symlink: metadata.file_type().is_symlink(),
     }
 }
 
@@ -255,13 +259,16 @@ fn build_scanned_file(
         .map(|d| (d.as_secs() as i64, d.subsec_nanos() as i64))
         .unwrap_or((0, 0));
 
+    let is_symlink = metadata.file_type().is_symlink();
     ScannedFile {
         relative_path: relative_path.to_string(),
         absolute_path: path.to_path_buf(),
         size: metadata.len(),
         mtime_secs,
         mtime_nanos,
+        device: None,
         inode: None,
-        mode: 0o644,
+        mode: if is_symlink { 0o120000 } else { 0o644 },
+        is_symlink,
     }
 }

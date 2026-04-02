@@ -5,8 +5,8 @@ pub enum ChkpttError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 
     #[error("Bitcode error: {0}")]
     Bitcode(String),

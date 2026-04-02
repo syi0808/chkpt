@@ -1,5 +1,7 @@
 # Git State Snapshot Design
 
+> Status: not implemented. The current codebase does not capture `.git/` state, does not expose `--git`, and no longer contains the old attachment-based git snapshot path.
+
 ## Problem
 
 `git bundle --all` only captures committed objects and refs. Critical git state is lost:

@@ -1,5 +1,7 @@
+use chkpt_core::config::{project_id_from_path, StoreLayout};
 use chkpt_core::ops::restore::{restore, RestoreOptions};
 use chkpt_core::ops::save::{save, SaveOptions};
+use chkpt_core::store::pack::list_packs;
 use std::fs;
 use tempfile::TempDir;
 
@@ -136,4 +138,88 @@ fn test_restore_after_add_remove_change_keeps_follow_up_save_incremental() {
 
     let resaved = save(workspace.path(), SaveOptions::default()).unwrap();
     assert_eq!(resaved.stats.new_objects, 0);
+}
+
+#[test]
+fn test_restore_reads_from_packed_objects() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "v1").unwrap();
+    fs::write(workspace.path().join("nested.txt"), "nested-v1").unwrap();
+    let snapshot = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    assert!(!list_packs(&layout.packs_dir()).unwrap().is_empty());
+
+    fs::write(workspace.path().join("a.txt"), "v2").unwrap();
+    fs::write(workspace.path().join("nested.txt"), "nested-v2").unwrap();
+
+    restore(
+        workspace.path(),
+        &snapshot.snapshot_id,
+        RestoreOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+        "v1"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("nested.txt")).unwrap(),
+        "nested-v1"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_restore_round_trips_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = TempDir::new().unwrap();
+    fs::create_dir_all(workspace.path().join("src")).unwrap();
+    fs::write(workspace.path().join("src/main.js"), "console.log('v1')").unwrap();
+    symlink("src/main.js", workspace.path().join("app.js")).unwrap();
+
+    let snapshot = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    fs::remove_file(workspace.path().join("app.js")).unwrap();
+    fs::write(workspace.path().join("app.js"), "not-a-link").unwrap();
+
+    restore(
+        workspace.path(),
+        &snapshot.snapshot_id,
+        RestoreOptions::default(),
+    )
+    .unwrap();
+
+    let metadata = fs::symlink_metadata(workspace.path().join("app.js")).unwrap();
+    assert!(metadata.file_type().is_symlink());
+    assert_eq!(
+        fs::read_link(workspace.path().join("app.js")).unwrap(),
+        std::path::PathBuf::from("src/main.js")
+    );
+}
+
+#[test]
+fn test_restore_works_without_snapshot_or_tree_files() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "v1").unwrap();
+    let snapshot = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    fs::remove_dir_all(layout.snapshots_dir()).unwrap();
+    fs::remove_dir_all(layout.trees_dir()).unwrap();
+
+    fs::write(workspace.path().join("a.txt"), "v2").unwrap();
+    restore(
+        workspace.path(),
+        &snapshot.snapshot_id,
+        RestoreOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+        "v1"
+    );
 }

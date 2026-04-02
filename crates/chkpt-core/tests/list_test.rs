@@ -1,7 +1,12 @@
+use chkpt_core::config::{project_id_from_path, StoreLayout};
 use chkpt_core::ops::list::list;
 use chkpt_core::ops::save::{save, SaveOptions};
 use std::fs;
 use tempfile::TempDir;
+
+fn root_tree_hash(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 
 #[test]
 fn test_list_empty() {
@@ -33,4 +38,19 @@ fn test_list_with_limit() {
     }
     let result = list(workspace.path(), Some(3)).unwrap();
     assert_eq!(result.len(), 3);
+}
+
+#[test]
+fn test_list_reads_from_catalog_without_snapshot_files() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "data").unwrap();
+    let saved = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    fs::remove_dir_all(layout.snapshots_dir()).unwrap();
+
+    let result = list(workspace.path(), None).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].id, saved.snapshot_id);
+    assert_ne!(root_tree_hash(&result[0].root_tree_hash), "0".repeat(64));
 }

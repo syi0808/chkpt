@@ -7,12 +7,13 @@
 Save a checkpoint of the current workspace.
 
 ```bash
-chkpt save [-m <message>]
+chkpt save [-m <message>] [--include-deps]
 ```
 
-| Argument          | Required | Description                             |
-| ----------------- | -------- | --------------------------------------- |
-| `-m`, `--message` | No       | Human-readable label for the checkpoint |
+| Argument          | Required | Description                                                |
+| ----------------- | -------- | ---------------------------------------------------------- |
+| `-m`, `--message` | No       | Human-readable label for the checkpoint                    |
+| `--include-deps`  | No       | Include dependency directories like `node_modules`, `.venv` |
 
 **Output:**
 
@@ -34,12 +35,13 @@ chkpt save -m "before refactoring auth module"
 List all checkpoints, newest first.
 
 ```bash
-chkpt list [--limit <n>]
+chkpt list [--limit <n>] [--full]
 ```
 
 | Argument        | Required | Description                           |
 | --------------- | -------- | ------------------------------------- |
 | `-n`, `--limit` | No       | Maximum number of checkpoints to show |
+| `--full`        | No       | Show full snapshot IDs                |
 
 **Output:**
 
@@ -65,13 +67,13 @@ chkpt list -n 5
 Restore workspace to a previous checkpoint.
 
 ```bash
-chkpt restore <id|latest> [--dry-run]
+chkpt restore [<id|latest>] [--dry-run]
 ```
 
-| Argument    | Required | Description                                     |
-| ----------- | -------- | ----------------------------------------------- |
-| `id`        | Yes      | Snapshot ID (first 8 chars suffice) or `latest` |
-| `--dry-run` | No       | Preview changes without modifying files         |
+| Argument    | Required | Description                                                 |
+| ----------- | -------- | ----------------------------------------------------------- |
+| `id`        | No       | Snapshot ID, prefix, or `latest`. If omitted, CLI prompts. |
+| `--dry-run` | No       | Preview changes without modifying files                     |
 
 **Dry-run output:**
 
@@ -126,6 +128,5 @@ Checkpoint <id> deleted.
 | ------------------------------ | -------------------------------------- | --------------------------------------- |
 | `Lock held by another process` | Another chkpt operation is in progress | Wait and retry, or inform user          |
 | `Snapshot not found: <id>`     | Invalid snapshot ID                    | Run `chkpt list` to show available IDs  |
-| `Guardrail exceeded: <detail>` | Workspace exceeds size/file limits     | Inform user of the limit hit            |
 | `Store corrupted: <detail>`    | Integrity issue in store               | Suggest inspecting store with Read tool |
 | `IO error: <detail>`           | File system error                      | Show raw error to user                  |

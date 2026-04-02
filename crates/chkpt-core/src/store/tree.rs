@@ -1,9 +1,8 @@
 use crate::error::{ChkpttError, Result};
 use bitcode::{Decode, Encode};
 use memmap2::Mmap;
-use serde::{Deserialize, Serialize};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
 const TREE_PACK_MAGIC: &[u8; 4] = b"CKTR";
@@ -11,14 +10,14 @@ const TREE_PACK_VERSION: u32 = 1;
 const TREE_IDX_ENTRY_SIZE: usize = 32 + 8 + 8; // hash(32) + offset(8) + size(8)
 const TREE_HEADER_SIZE: u64 = 12;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub enum EntryType {
     File,
     Dir,
     Symlink,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct TreeEntry {
     pub name: String,
     pub entry_type: EntryType,
@@ -49,19 +48,26 @@ impl TreeStore {
         let dat_path = base_dir.join("trees.dat");
         let idx_path = base_dir.join("trees.idx");
 
-        let (pack_dat, pack_idx, pack_entry_count) = if dat_path.exists() && idx_path.exists() {
-            match (
-                std::fs::File::open(&dat_path).and_then(|f| unsafe { Mmap::map(&f) }),
-                std::fs::File::open(&idx_path).and_then(|f| unsafe { Mmap::map(&f) }),
-            ) {
+        let (pack_dat, pack_idx, pack_entry_count) = match (
+            std::fs::File::open(&dat_path),
+            std::fs::File::open(&idx_path),
+        ) {
+            (Ok(dat_file), Ok(idx_file)) => match (unsafe { Mmap::map(&dat_file) }, unsafe {
+                Mmap::map(&idx_file)
+            }) {
                 (Ok(dat), Ok(idx)) => {
                     let count = idx.len() / TREE_IDX_ENTRY_SIZE;
                     (Some(dat), Some(idx), count)
                 }
                 _ => (None, None, 0),
+            },
+            (Err(dat_error), _) if dat_error.kind() == std::io::ErrorKind::NotFound => {
+                (None, None, 0)
             }
-        } else {
-            (None, None, 0)
+            (_, Err(idx_error)) if idx_error.kind() == std::io::ErrorKind::NotFound => {
+                (None, None, 0)
+            }
+            _ => (None, None, 0),
         };
 
         Self {
@@ -70,10 +76,6 @@ impl TreeStore {
             pack_idx,
             pack_entry_count,
         }
-    }
-
-    pub fn base_dir(&self) -> &Path {
-        &self.base_dir
     }
 
     fn tree_path(&self, hash_hex: &str) -> PathBuf {
@@ -89,16 +91,20 @@ impl TreeStore {
         let encoded = bitcode::encode(&sorted);
         let hash_hex = blake3::hash(&encoded).to_hex().to_string();
         let path = self.tree_path(&hash_hex);
-        if path.exists() {
-            return Ok(hash_hex);
+        let parent = path
+            .parent()
+            .ok_or_else(|| ChkpttError::Other("Tree path missing parent directory".into()))?;
+        std::fs::create_dir_all(parent)?;
+
+        let mut tmp = NamedTempFile::new_in(parent)?;
+        tmp.write_all(&encoded)?;
+        tmp.flush()?;
+
+        match tmp.persist_noclobber(&path) {
+            Ok(_) => Ok(hash_hex),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(hash_hex),
+            Err(error) => Err(error.error.into()),
         }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp_path = path.with_extension("tmp");
-        std::fs::write(&tmp_path, &encoded)?;
-        std::fs::rename(&tmp_path, &path)?;
-        Ok(hash_hex)
     }
 
     /// Write a batch of pre-computed trees to a pack file.
@@ -206,10 +212,13 @@ impl TreeStore {
 
         // Fall back to loose file
         let path = self.tree_path(hash_hex);
-        if !path.exists() {
-            return Err(ChkpttError::ObjectNotFound(hash_hex.to_string()));
-        }
-        let data = std::fs::read(&path)?;
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ChkpttError::ObjectNotFound(hash_hex.to_string()));
+            }
+            Err(error) => return Err(error.into()),
+        };
         let entries: Vec<TreeEntry> = bitcode::decode(&data)?;
         Ok(entries)
     }
@@ -243,48 +252,6 @@ impl TreeStore {
             }
         }
         None
-    }
-
-    pub fn exists(&self, hash_hex: &str) -> bool {
-        // Check pack
-        if self.read_from_pack(hash_hex).is_some() {
-            return true;
-        }
-        // Check loose
-        self.tree_path(hash_hex).exists()
-    }
-
-    pub fn remove(&self, hash_hex: &str) -> Result<()> {
-        let path = self.tree_path(hash_hex);
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-        }
-        Ok(())
-    }
-
-    /// List all loose tree hashes.
-    pub fn list_loose(&self) -> Result<Vec<String>> {
-        let mut hashes = Vec::new();
-        if !self.base_dir.exists() {
-            return Ok(hashes);
-        }
-        for prefix_entry in std::fs::read_dir(&self.base_dir)? {
-            let prefix_entry = prefix_entry?;
-            if !prefix_entry.file_type()?.is_dir() {
-                continue;
-            }
-            let prefix = prefix_entry.file_name().to_string_lossy().to_string();
-            for entry in std::fs::read_dir(prefix_entry.path())? {
-                let entry = entry?;
-                if entry.file_type()?.is_file() {
-                    let rest = entry.file_name().to_string_lossy().to_string();
-                    if !rest.ends_with(".tmp") {
-                        hashes.push(format!("{}{}", prefix, rest));
-                    }
-                }
-            }
-        }
-        Ok(hashes)
     }
 }
 

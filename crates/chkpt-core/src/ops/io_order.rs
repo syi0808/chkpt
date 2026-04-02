@@ -36,7 +36,10 @@ mod tests {
         let mut refs = vec![&f1, &f2, &f3, &f4];
         sort_scanned_refs_for_locality(&mut refs);
 
-        let paths: Vec<&str> = refs.iter().map(|file| file.relative_path.as_str()).collect();
+        let paths: Vec<&str> = refs
+            .iter()
+            .map(|file| file.relative_path.as_str())
+            .collect();
         assert_eq!(paths, vec!["c.txt", "a.txt", "b.txt", "z.txt"]);
     }
 
@@ -65,8 +68,10 @@ mod tests {
             size: 0,
             mtime_secs: 0,
             mtime_nanos: 0,
+            device: None,
             inode,
             mode: 0o100644,
+            is_symlink: false,
         }
     }
 }

@@ -1,9 +1,19 @@
+use chkpt_core::error::ChkpttError;
 use chkpt_core::ops::delete::delete;
 use chkpt_core::ops::list::list;
 use chkpt_core::ops::restore::{restore, RestoreOptions};
 use chkpt_core::ops::save::{save, SaveOptions};
 use std::fs;
 use tempfile::TempDir;
+
+fn unique_prefix(snapshot_id: &str, other_snapshot_id: &str) -> String {
+    let shared = snapshot_id
+        .chars()
+        .zip(other_snapshot_id.chars())
+        .take_while(|(left, right)| left == right)
+        .count();
+    snapshot_id.chars().take(shared + 1).collect()
+}
 
 /// Full lifecycle: save -> list -> restore -> verify
 #[test]
@@ -260,6 +270,145 @@ fn test_e2e_restore_latest() {
     assert_eq!(
         fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
         "v2"
+    );
+}
+
+#[test]
+fn test_e2e_restore_unique_prefix() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "v1").unwrap();
+    let r1 = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    fs::write(workspace.path().join("a.txt"), "v2").unwrap();
+    let r2 = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    fs::write(workspace.path().join("a.txt"), "v3").unwrap();
+
+    let prefix = unique_prefix(&r1.snapshot_id, &r2.snapshot_id);
+    restore(workspace.path(), &prefix, RestoreOptions::default()).unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+        "v1"
+    );
+
+    fs::write(workspace.path().join("a.txt"), "v4").unwrap();
+    let latest_prefix = unique_prefix(&r2.snapshot_id, &r1.snapshot_id);
+    restore(workspace.path(), &latest_prefix, RestoreOptions::default()).unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+        "v2"
+    );
+}
+
+#[test]
+fn test_e2e_restore_ambiguous_prefix_errors() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "v1").unwrap();
+    let r1 = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    fs::write(workspace.path().join("a.txt"), "v2").unwrap();
+    let r2 = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let shared_prefix: String = r1
+        .snapshot_id
+        .chars()
+        .zip(r2.snapshot_id.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(ch, _)| ch)
+        .collect();
+    assert!(!shared_prefix.is_empty());
+
+    let err = restore(
+        workspace.path(),
+        &shared_prefix,
+        RestoreOptions {
+            dry_run: true,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ChkpttError::Other(message) if message.contains("Ambiguous snapshot prefix"))
+    );
+}
+
+#[test]
+fn test_e2e_repeated_restore_save_delete_lifecycle() {
+    let workspace = TempDir::new().unwrap();
+
+    fs::create_dir_all(workspace.path().join("src")).unwrap();
+    fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { println!(\"v1\"); }",
+    )
+    .unwrap();
+    let first = save(
+        workspace.path(),
+        SaveOptions {
+            message: Some("first".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { println!(\"v2\"); }",
+    )
+    .unwrap();
+    fs::write(workspace.path().join("README.md"), "# v2").unwrap();
+    let second = save(
+        workspace.path(),
+        SaveOptions {
+            message: Some("second".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    restore(
+        workspace.path(),
+        &first.snapshot_id,
+        RestoreOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("src/main.rs")).unwrap(),
+        "fn main() { println!(\"v1\"); }"
+    );
+    assert!(!workspace.path().join("README.md").exists());
+
+    let resaved = save(
+        workspace.path(),
+        SaveOptions {
+            message: Some("resaved".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(resaved.stats.new_objects, 0);
+
+    delete(workspace.path(), &first.snapshot_id).unwrap();
+    delete(workspace.path(), &resaved.snapshot_id).unwrap();
+
+    fs::write(
+        workspace.path().join("src/main.rs"),
+        "fn main() { println!(\"mutated\"); }",
+    )
+    .unwrap();
+    restore(
+        workspace.path(),
+        &second.snapshot_id,
+        RestoreOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("src/main.rs")).unwrap(),
+        "fn main() { println!(\"v2\"); }"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("README.md")).unwrap(),
+        "# v2"
     );
 }
 

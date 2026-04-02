@@ -59,7 +59,7 @@ impl IgnoreMatcher {
     /// `is_dir` indicates whether the path is a directory.
     pub fn is_ignored(&self, relative_path: &str, is_dir: bool) -> bool {
         // Check built-in exclusions first
-        if has_excluded_directory_component(relative_path, is_dir, self.include_deps) {
+        if has_excluded_directory_component(relative_path, self.include_deps) {
             return true;
         }
 
@@ -75,20 +75,15 @@ impl IgnoreMatcher {
     }
 }
 
-fn has_excluded_directory_component(relative_path: &str, is_dir: bool, include_deps: bool) -> bool {
+fn has_excluded_directory_component(relative_path: &str, include_deps: bool) -> bool {
     let mut components = relative_path.split('/').peekable();
 
     while let Some(component) = components.next() {
-        let is_last = components.peek().is_none();
-        let is_directory_component = is_dir || !is_last;
-
-        if is_directory_component {
-            if ALWAYS_EXCLUDED.contains(&component) {
-                return true;
-            }
-            if !include_deps && DEPENDENCY_DIRS.contains(&component) {
-                return true;
-            }
+        if ALWAYS_EXCLUDED.contains(&component) {
+            return true;
+        }
+        if !include_deps && DEPENDENCY_DIRS.contains(&component) {
+            return true;
         }
     }
 
@@ -105,18 +100,25 @@ mod tests {
     fn test_builtin_exclusions() {
         let matcher = IgnoreMatcher::new(None, false);
         assert!(matcher.is_ignored(".git", true));
+        assert!(matcher.is_ignored(".git", false));
         assert!(matcher.is_ignored(".git/HEAD", false));
         assert!(matcher.is_ignored("node_modules", true));
+        assert!(matcher.is_ignored("node_modules", false));
         assert!(matcher.is_ignored("node_modules/pkg/index.js", false));
         assert!(matcher.is_ignored(".chkpt", true));
+        assert!(matcher.is_ignored(".chkpt", false));
         assert!(matcher.is_ignored(".chkpt/config", false));
         assert!(matcher.is_ignored("target", true));
+        assert!(matcher.is_ignored("target", false));
         assert!(matcher.is_ignored("target/debug/main", false));
         assert!(matcher.is_ignored("packages/app/node_modules", true));
+        assert!(matcher.is_ignored("packages/app/node_modules", false));
         assert!(matcher.is_ignored("packages/app/node_modules/pkg/index.js", false));
         assert!(matcher.is_ignored("services/api/.venv", true));
+        assert!(matcher.is_ignored("services/api/.venv", false));
         assert!(matcher.is_ignored("services/api/.venv/lib/site.py", false));
         assert!(matcher.is_ignored("crates/core/target", true));
+        assert!(matcher.is_ignored("crates/core/target", false));
         assert!(matcher.is_ignored("crates/core/target/debug/app", false));
     }
 

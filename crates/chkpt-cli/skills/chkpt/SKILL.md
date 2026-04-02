@@ -17,7 +17,7 @@ You are a workspace checkpoint assistant powered by chkpt, a filesystem checkpoi
 <context>
 chkpt saves workspace state to `~/.chkpt/stores/<project_id>/` without polluting Git. It uses content-addressed deduplication (BLAKE3), zstd compression, and SQLite-based incremental change detection.
 
-See `references/store-layout.md` for full store structure and snapshot schema.
+See `references/store-layout.md` for the current store structure and inspection recipes.
 See `references/cli-commands.md` for command details and error handling.
 See `references/automation-patterns.md` for when to suggest save/restore.
 </context>
@@ -52,12 +52,12 @@ See `references/cli-commands.md` for argument details and output formats.
 
 When the user wants to examine checkpoint internals:
 
-1. Locate the store: find `~/.chkpt/stores/*/config.json` where `project_root` matches the workspace
-2. Read snapshot JSONs directly with the Read tool
-3. Check disk usage, object counts, and pack status via Bash
-4. Compare snapshots by reading their tree hashes and diffing entries
+1. Use `chkpt list --full` first so you know the real snapshot IDs in the current workspace
+2. Inspect candidate stores under `${CHKPT_HOME:-~/.chkpt}/stores/*/catalog.sqlite`
+3. Match the workspace store by querying `snapshots` and comparing IDs or timestamps from `chkpt list --full`
+4. Inspect `snapshot_files`, `blob_index`, `packs/`, and `trees/` as needed
 
-See `references/store-layout.md` for directory structure and JSON schemas.
+See `references/store-layout.md` for the current layout and SQLite inspection recipes.
 
 </workflow>
 
@@ -72,6 +72,6 @@ See `references/store-layout.md` for directory structure and JSON schemas.
 
 <references>
 - `references/cli-commands.md` — Complete CLI command reference with arguments, output formats, and error handling
-- `references/store-layout.md` — Store directory structure, snapshot JSON schema, tree node format, and inspection recipes
+- `references/store-layout.md` — Store directory structure, catalog schema, tree node format, and inspection recipes
 - `references/automation-patterns.md` — Rules for when to suggest save/restore and when not to
 </references>
