@@ -260,7 +260,8 @@ fn restore_file(
         }
         RestoreSource::Packed(location) => {
             if task.is_symlink {
-                let content = pack_set.read(&task.hash_hex)?;
+                let mut content = Vec::new();
+                pack_set.copy_to_writer(&location, &mut content)?;
                 restore_symlink(&file_path, &content)?;
             } else {
                 let file = std::fs::File::create(&file_path)?;
@@ -289,13 +290,89 @@ fn restore_symlink(_path: &Path, _target_bytes: &[u8]) -> Result<()> {
     ))
 }
 
-fn build_restore_tasks(
+fn resolve_restore_sources(
     files_to_add: &[String],
     files_to_change: &[String],
     target_state: &BTreeMap<String, TargetFileState>,
     blob_store: &BlobStore,
     has_loose_objects: bool,
-    pack_set: &PackSet,
+    catalog: &MetadataCatalog,
+    packs_dir: &Path,
+) -> Result<(PackSet, HashMap<[u8; 32], RestoreSource>)> {
+    let mut sources = HashMap::new();
+    let mut packed_hashes = Vec::new();
+    let mut packed_hash_hexes = HashMap::new();
+
+    for path in files_to_add.iter().chain(files_to_change.iter()) {
+        let target = target_state
+            .get(path)
+            .expect("target hash missing for restore source");
+        if sources.contains_key(&target.hash) || packed_hash_hexes.contains_key(&target.hash) {
+            continue;
+        }
+
+        let hash_hex = bytes_to_hex(&target.hash);
+        if has_loose_objects && blob_store.exists(&hash_hex) {
+            sources.insert(target.hash, RestoreSource::Loose);
+        } else {
+            packed_hashes.push(target.hash);
+            packed_hash_hexes.insert(target.hash, hash_hex);
+        }
+    }
+
+    if packed_hashes.is_empty() {
+        return Ok((PackSet::empty(), sources));
+    }
+
+    let blob_locations = catalog.blob_locations_for_hashes(&packed_hashes)?;
+    let mut selected_pack_hashes = HashSet::new();
+    let mut can_selectively_open = true;
+
+    for hash in &packed_hashes {
+        match blob_locations.get(hash).and_then(|location| location.pack_hash.as_ref()) {
+            Some(pack_hash) => {
+                selected_pack_hashes.insert(pack_hash.clone());
+            }
+            None => {
+                can_selectively_open = false;
+                break;
+            }
+        }
+    }
+
+    let pack_set = if can_selectively_open {
+        let mut pack_hashes: Vec<_> = selected_pack_hashes.into_iter().collect();
+        pack_hashes.sort_unstable();
+        PackSet::open_selected(packs_dir, &pack_hashes)?
+    } else {
+        PackSet::open_all(packs_dir)?
+    };
+
+    for hash in packed_hashes {
+        let hash_hex = packed_hash_hexes
+            .remove(&hash)
+            .expect("packed hash missing hex encoding");
+        let location = if can_selectively_open {
+            let pack_hash = blob_locations
+                .get(&hash)
+                .and_then(|location| location.pack_hash.as_ref())
+                .expect("selective pack hash missing");
+            pack_set.locate_in_pack(pack_hash, &hash_hex)
+        } else {
+            pack_set.locate(&hash_hex)
+        }
+        .ok_or_else(|| ChkpttError::ObjectNotFound(hash_hex.clone()))?;
+        sources.insert(hash, RestoreSource::Packed(location));
+    }
+
+    Ok((pack_set, sources))
+}
+
+fn build_restore_tasks(
+    files_to_add: &[String],
+    files_to_change: &[String],
+    target_state: &BTreeMap<String, TargetFileState>,
+    restore_sources: &HashMap<[u8; 32], RestoreSource>,
 ) -> Result<Vec<RestoreTask>> {
     let mut tasks = Vec::with_capacity(files_to_add.len() + files_to_change.len());
 
@@ -304,16 +381,9 @@ fn build_restore_tasks(
             .get(path)
             .expect("target hash missing for restore task");
         let hash_hex = bytes_to_hex(&target.hash);
-
-        let source = if has_loose_objects && blob_store.exists(&hash_hex) {
-            RestoreSource::Loose
-        } else {
-            RestoreSource::Packed(
-                pack_set
-                    .locate(&hash_hex)
-                    .ok_or_else(|| ChkpttError::ObjectNotFound(hash_hex.clone()))?,
-            )
-        };
+        let source = *restore_sources
+            .get(&target.hash)
+            .ok_or_else(|| ChkpttError::ObjectNotFound(hash_hex.clone()))?;
 
         tasks.push(RestoreTask {
             path: path.clone(),
@@ -472,7 +542,15 @@ pub fn restore(
     let blob_store = BlobStore::new(layout.objects_dir());
     let has_loose_objects = blob_store_has_loose_objects(&layout.objects_dir())?;
     let packs_dir = layout.packs_dir();
-    let pack_set = PackSet::open_all(&packs_dir)?;
+    let (pack_set, restore_sources) = resolve_restore_sources(
+        &files_to_add,
+        &files_to_change,
+        &target_state,
+        &blob_store,
+        has_loose_objects,
+        &catalog,
+        &packs_dir,
+    )?;
 
     let restore_total = (files_to_add.len() + files_to_change.len() + files_to_remove.len()) as u64;
     emit(
@@ -489,9 +567,7 @@ pub fn restore(
         &files_to_add,
         &files_to_change,
         &target_state,
-        &blob_store,
-        has_loose_objects,
-        &pack_set,
+        &restore_sources,
     )?;
     let restore_progress = AtomicU64::new(0);
     let restored_paths = restore_files(

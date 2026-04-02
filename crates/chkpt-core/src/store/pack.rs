@@ -1,6 +1,7 @@
 use crate::error::{ChkpttError, Result};
 use crate::store::blob::{hash_content, BlobStore};
 use memmap2::Mmap;
+use std::collections::HashMap;
 use std::io::{BufWriter, Cursor, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
@@ -247,15 +248,34 @@ impl PackReader {
 
 pub struct PackSet {
     readers: Vec<PackReader>,
+    reader_indices: HashMap<String, usize>,
 }
 
 impl PackSet {
     pub fn open_all(packs_dir: &Path) -> Result<Self> {
-        let readers = list_packs(packs_dir)?
-            .into_iter()
-            .map(|pack_hash| PackReader::open(packs_dir, &pack_hash))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self { readers })
+        let pack_hashes = list_packs(packs_dir)?;
+        Self::open_selected(packs_dir, &pack_hashes)
+    }
+
+    pub fn open_selected(packs_dir: &Path, pack_hashes: &[String]) -> Result<Self> {
+        let mut readers = Vec::with_capacity(pack_hashes.len());
+        let mut reader_indices = HashMap::with_capacity(pack_hashes.len());
+        for pack_hash in pack_hashes {
+            let reader_index = readers.len();
+            readers.push(PackReader::open(packs_dir, pack_hash)?);
+            reader_indices.insert(pack_hash.clone(), reader_index);
+        }
+        Ok(Self {
+            readers,
+            reader_indices,
+        })
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            readers: Vec::new(),
+            reader_indices: HashMap::new(),
+        }
     }
 
     pub fn try_read(&self, hash_hex: &str) -> Option<Vec<u8>> {
@@ -285,6 +305,16 @@ impl PackSet {
                     size: entry.size,
                 })
             })
+    }
+
+    pub(crate) fn locate_in_pack(&self, pack_hash: &str, hash_hex: &str) -> Option<PackLocation> {
+        let reader_index = *self.reader_indices.get(pack_hash)?;
+        let reader = self.readers.get(reader_index)?;
+        reader.find(hash_hex).map(|entry| PackLocation {
+            reader_index,
+            offset: entry.offset,
+            size: entry.size,
+        })
     }
 
     pub(crate) fn copy_to_writer<W: Write>(

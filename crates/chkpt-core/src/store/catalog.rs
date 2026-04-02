@@ -1,8 +1,8 @@
 use crate::error::{ChkpttError, Result};
 use crate::store::snapshot::SnapshotStats;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension, Row};
-use std::collections::HashSet;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const CREATE_SCHEMA: &str = r#"
@@ -315,6 +315,41 @@ impl MetadataCatalog {
             .optional()?)
     }
 
+    pub fn blob_locations_for_hashes(
+        &self,
+        blob_hashes: &[[u8; 32]],
+    ) -> Result<HashMap<[u8; 32], BlobLocation>> {
+        const SQLITE_MAX_VARS: usize = 512;
+
+        if blob_hashes.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut locations = HashMap::with_capacity(blob_hashes.len());
+        for chunk in blob_hashes.chunks(SQLITE_MAX_VARS) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "SELECT blob_hash, pack_hash, size FROM blob_index WHERE blob_hash IN ({})",
+                placeholders
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(
+                    params_from_iter(chunk.iter().map(|hash| hash.as_slice())),
+                    |row: &Row<'_>| {
+                        let hash: Vec<u8> = row.get(0)?;
+                        row_to_blob_location(hash, row)
+                    },
+                )?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            locations.extend(rows);
+        }
+
+        Ok(locations)
+    }
+
     pub fn all_blob_hashes(&self) -> Result<HashSet<[u8; 32]>> {
         let mut stmt = self.conn.prepare("SELECT blob_hash FROM blob_index")?;
         let hashes = stmt
@@ -355,5 +390,60 @@ impl MetadataCatalog {
             .conn
             .prepare("SELECT COUNT(*) FROM blob_index WHERE pack_hash = ?1")?;
         Ok(stmt.query_row(params![pack_hash], |row: &Row<'_>| row.get::<_, i64>(0))? as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_blob_locations_for_hashes_returns_requested_rows() {
+        let dir = TempDir::new().unwrap();
+        let catalog = MetadataCatalog::open(dir.path().join("catalog.db")).unwrap();
+
+        let hash_a = *blake3::hash(b"a").as_bytes();
+        let hash_b = *blake3::hash(b"b").as_bytes();
+        let hash_missing = *blake3::hash(b"missing").as_bytes();
+
+        catalog
+            .bulk_upsert_blob_locations(&[
+                (
+                    hash_a,
+                    BlobLocation {
+                        pack_hash: Some("pack-a".to_string()),
+                        size: 10,
+                    },
+                ),
+                (
+                    hash_b,
+                    BlobLocation {
+                        pack_hash: None,
+                        size: 20,
+                    },
+                ),
+            ])
+            .unwrap();
+
+        let locations = catalog
+            .blob_locations_for_hashes(&[hash_a, hash_b, hash_missing])
+            .unwrap();
+
+        assert_eq!(
+            locations.get(&hash_a),
+            Some(&BlobLocation {
+                pack_hash: Some("pack-a".to_string()),
+                size: 10,
+            })
+        );
+        assert_eq!(
+            locations.get(&hash_b),
+            Some(&BlobLocation {
+                pack_hash: None,
+                size: 20,
+            })
+        );
+        assert!(!locations.contains_key(&hash_missing));
     }
 }

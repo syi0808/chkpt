@@ -111,6 +111,26 @@ fn test_pack_set_reads_across_multiple_packs() {
 }
 
 #[test]
+fn test_pack_set_open_selected_limits_visible_packs() {
+    let dir = TempDir::new().unwrap();
+    let packs_dir = dir.path().join("packs");
+    std::fs::create_dir_all(&packs_dir).unwrap();
+
+    let mut writer_one = PackWriter::new(&packs_dir).unwrap();
+    let hash_one = writer_one.add(b"first-pack").unwrap();
+    let pack_one = writer_one.finish().unwrap();
+
+    let mut writer_two = PackWriter::new(&packs_dir).unwrap();
+    let hash_two = writer_two.add(b"second-pack").unwrap();
+    writer_two.finish().unwrap();
+
+    let pack_set = PackSet::open_selected(&packs_dir, &[pack_one]).unwrap();
+
+    assert_eq!(pack_set.read(&hash_one).unwrap(), b"first-pack");
+    assert!(pack_set.try_read(&hash_two).is_none());
+}
+
+#[test]
 fn test_pack_write_with_precompressed_entries() {
     let dir = TempDir::new().unwrap();
     let packs_dir = dir.path().join("packs");
