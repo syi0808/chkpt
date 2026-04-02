@@ -1153,36 +1153,86 @@ def remove_worktree(path: Path) -> None:
         raise RuntimeError(completed.stdout.strip() or "git worktree remove failed")
 
 
-def build_benchmark_artifacts(repo_root: Path) -> None:
+def build_benchmark_artifacts(repo_root: Path, selected: list[str]) -> None:
     env = os.environ.copy()
     env["CARGO_TERM_COLOR"] = "never"
-    run_command(
-        [
-            "cargo",
-            "build",
-            "--release",
-            "-p",
-            "chkpt-core",
-            "--example",
-            "bench_ops",
-            "--example",
-            "bench_catalog",
-            "--bench",
-            "save_pipeline",
-        ],
-        env,
-        cwd=repo_root,
+    run_command(build_command_for_scenarios(selected), env, cwd=repo_root)
+
+
+def execute_benchmark_run(
+    label: str,
+    selected: list[str],
+    skip_build: bool,
+    repo_root: Path,
+    persist_run_dir: bool = True,
+) -> tuple[dict[str, Any], Path | None]:
+    needed_fixtures = sorted(
+        {SCENARIOS[name].fixture for name in selected if SCENARIOS[name].fixture is not None}
     )
+    fixture_paths = generate_selected_fixtures([name for name in needed_fixtures if name is not None])
 
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_dir: Path | None = None
+    raw_dir: Path | None = None
+    if persist_run_dir:
+        run_dir = RUNS_ROOT / f"{timestamp}-{sanitize_label(label)}"
+        raw_dir = run_dir / "raw"
+        ensure_dir(raw_dir)
+    ensure_dir(HOMES_ROOT)
 
-def run_script_command(repo_root: Path, argv: list[str]) -> tuple[dict[str, Any], str]:
+    benchmark_home = HOMES_ROOT / f"{timestamp}-{sanitize_label(label)}"
+    ensure_dir(benchmark_home)
+
     env = os.environ.copy()
     env["CARGO_TERM_COLOR"] = "never"
-    output = run_command([sys.executable, "scripts/benchmarks.py", *argv], env, cwd=repo_root)
-    result_path = next((line.strip() for line in reversed(output.splitlines()) if line.strip()), None)
-    if result_path is None:
-        raise ValueError(f"failed to parse results path from output:\n{output}")
-    return load_result(result_path), output
+    env["CHKPT_HOME"] = str(benchmark_home)
+
+    if not skip_build:
+        print("Building release benchmark artifacts...")
+        build_output = run_command(build_command_for_scenarios(selected), env, cwd=repo_root)
+        if raw_dir is not None:
+            (raw_dir / "_build.txt").write_text(build_output, encoding="utf-8")
+
+    results: list[dict[str, Any]] = []
+    for name in selected:
+        scenario = SCENARIOS[name]
+        command = list(scenario.command)
+        if scenario.fixture:
+            command.append(fixture_paths[scenario.fixture])
+        print(f"Running {name}...")
+        output = run_command(command, env, cwd=repo_root)
+        if raw_dir is not None:
+            (raw_dir / f"{name}.txt").write_text(output, encoding="utf-8")
+        if scenario.kind == "bench_ops":
+            parsed = parse_bench_ops(output)
+        elif scenario.kind == "bench_catalog":
+            parsed = parse_bench_catalog(output)
+        else:
+            parsed = parse_save_pipeline(output)
+        results.append(
+            {
+                "name": name,
+                "kind": scenario.kind,
+                "description": scenario.description,
+                "command": command,
+                "fixture": fixture_paths.get(scenario.fixture) if scenario.fixture else None,
+                "parsed": parsed,
+            }
+        )
+
+    payload = {
+        "label": label,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "git": git_info(repo_root),
+        "benchmark_home": str(benchmark_home),
+        "results": results,
+    }
+    if run_dir is not None:
+        ensure_dir(run_dir)
+        results_path = run_dir / "results.json"
+        results_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        return payload, results_path
+    return payload, None
 
 
 def generate_selected_fixtures(names: list[str]) -> dict[str, str]:
@@ -1196,6 +1246,31 @@ def generate_selected_fixtures(names: list[str]) -> dict[str, str]:
 
 def scenario_names_from_args(values: list[str] | None, known: list[str]) -> list[str]:
     return values if values else known
+
+
+def build_command_for_scenarios(selected: list[str]) -> list[str]:
+    cmd = ["cargo", "build", "--release", "-p", "chkpt-core"]
+    needs_bench_ops = False
+    needs_bench_catalog = False
+    needs_save_pipeline = False
+
+    for name in selected:
+        kind = SCENARIOS[name].kind
+        if kind == "bench_ops":
+            needs_bench_ops = True
+        elif kind == "bench_catalog":
+            needs_bench_catalog = True
+        elif kind == "save_pipeline":
+            needs_save_pipeline = True
+
+    if needs_bench_ops:
+        cmd.extend(["--example", "bench_ops"])
+    if needs_bench_catalog:
+        cmd.extend(["--example", "bench_catalog"])
+    if needs_save_pipeline:
+        cmd.extend(["--bench", "save_pipeline"])
+
+    return cmd
 
 
 def cmd_list() -> int:
@@ -1220,80 +1295,14 @@ def cmd_fixtures(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     selected = scenario_names_from_args(args.scenarios, DEFAULT_SCENARIOS)
-    needed_fixtures = sorted(
-        {SCENARIOS[name].fixture for name in selected if SCENARIOS[name].fixture is not None}
+    _payload, results_path = execute_benchmark_run(
+        args.label,
+        selected,
+        args.skip_build,
+        REPO_ROOT,
+        persist_run_dir=True,
     )
-    fixture_paths = generate_selected_fixtures([name for name in needed_fixtures if name is not None])
-
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = RUNS_ROOT / f"{timestamp}-{sanitize_label(args.label)}"
-    raw_dir = run_dir / "raw"
-    ensure_dir(raw_dir)
-    ensure_dir(HOMES_ROOT)
-
-    benchmark_home = HOMES_ROOT / f"{timestamp}-{sanitize_label(args.label)}"
-    ensure_dir(benchmark_home)
-
-    env = os.environ.copy()
-    env["CARGO_TERM_COLOR"] = "never"
-    env["CHKPT_HOME"] = str(benchmark_home)
-
-    if not args.skip_build:
-        print("Building release benchmark artifacts...")
-        build_output = run_command(
-            [
-                "cargo",
-                "build",
-                "--release",
-                "-p",
-                "chkpt-core",
-                "--example",
-                "bench_ops",
-                "--example",
-                "bench_catalog",
-                "--bench",
-                "save_pipeline",
-            ],
-            env,
-        )
-        (raw_dir / "_build.txt").write_text(build_output, encoding="utf-8")
-
-    results: list[dict[str, Any]] = []
-    for name in selected:
-        scenario = SCENARIOS[name]
-        command = list(scenario.command)
-        if scenario.fixture:
-            command.append(fixture_paths[scenario.fixture])
-        print(f"Running {name}...")
-        output = run_command(command, env)
-        (raw_dir / f"{name}.txt").write_text(output, encoding="utf-8")
-        if scenario.kind == "bench_ops":
-            parsed = parse_bench_ops(output)
-        elif scenario.kind == "bench_catalog":
-            parsed = parse_bench_catalog(output)
-        else:
-            parsed = parse_save_pipeline(output)
-        results.append(
-            {
-                "name": name,
-                "kind": scenario.kind,
-                "description": scenario.description,
-                "command": command,
-                "fixture": fixture_paths.get(scenario.fixture) if scenario.fixture else None,
-                "parsed": parsed,
-            }
-        )
-
-    payload = {
-        "label": args.label,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "git": git_info(),
-        "benchmark_home": str(benchmark_home),
-        "results": results,
-    }
-    ensure_dir(run_dir)
-    results_path = run_dir / "results.json"
-    results_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    assert results_path is not None
     print(results_path)
     return 0
 
@@ -1330,20 +1339,23 @@ def cmd_compare_commits(args: argparse.Namespace) -> int:
 
         if not args.skip_build:
             print(f"Building before ref {args.before_ref}...")
-            build_benchmark_artifacts(before_worktree)
+            build_benchmark_artifacts(before_worktree, selected)
             print(f"Building after ref {args.after_ref}...")
-            build_benchmark_artifacts(after_worktree)
+            build_benchmark_artifacts(after_worktree, selected)
 
         for round_index in range(args.rounds):
             order = ["before", "after"] if round_index % 2 == 0 else ["after", "before"]
             for side in order:
                 repo_root = before_worktree if side == "before" else after_worktree
                 run_label = f"{args.label}-{side}-r{round_index + 1}"
-                run_args = ["run", "--label", run_label, "--skip-build"]
-                for scenario in selected:
-                    run_args.extend(["--scenario", scenario])
                 print(f"Round {round_index + 1}/{args.rounds}: running {side}...")
-                payload, _output = run_script_command(repo_root, run_args)
+                payload, _ = execute_benchmark_run(
+                    run_label,
+                    selected,
+                    skip_build=True,
+                    repo_root=repo_root,
+                    persist_run_dir=False,
+                )
                 schedule.append(f"round={round_index + 1}:{side}")
                 if side == "before":
                     before_runs.append(payload)
