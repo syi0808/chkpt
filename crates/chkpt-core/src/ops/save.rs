@@ -164,7 +164,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     for scanned in &scanned_files {
         if let Some(paths) = current_paths.as_mut() {
-            paths.insert(scanned.relative_path.clone());
+            paths.insert(scanned.relative_path.as_str());
         }
 
         if let Some(processed) =
@@ -186,7 +186,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         .map(|paths| {
             cached_entries
                 .keys()
-                .filter(|path| !paths.contains(*path))
+                .filter(|path| !paths.contains(path.as_str()))
                 .cloned()
                 .collect::<Vec<_>>()
         })
