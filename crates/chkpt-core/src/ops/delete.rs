@@ -12,10 +12,14 @@ fn bytes_to_hex(bytes: &[u8; 32]) -> String {
 
 fn collect_reachable_blobs_from_tree(
     tree_store: &TreeStore,
-    tree_hash_hex: &str,
+    tree_hash: &[u8; 32],
     reachable_blobs: &mut HashSet<[u8; 32]>,
+    visited: &mut HashSet<[u8; 32]>,
 ) -> Result<()> {
-    let entries = tree_store.read(tree_hash_hex)?;
+    if !visited.insert(*tree_hash) {
+        return Ok(());
+    }
+    let entries = tree_store.read(&bytes_to_hex(tree_hash))?;
     for entry in entries {
         match entry.entry_type {
             EntryType::File | EntryType::Symlink => {
@@ -24,8 +28,9 @@ fn collect_reachable_blobs_from_tree(
             EntryType::Dir => {
                 collect_reachable_blobs_from_tree(
                     tree_store,
-                    &bytes_to_hex(&entry.hash),
+                    &entry.hash,
                     reachable_blobs,
+                    visited,
                 )?;
             }
         }
@@ -39,6 +44,7 @@ fn collect_reachable_blobs(
     snapshots: &[CatalogSnapshot],
 ) -> Result<Option<HashSet<[u8; 32]>>> {
     let mut reachable = HashSet::new();
+    let mut visited: HashSet<[u8; 32]> = HashSet::new();
 
     for snapshot in snapshots {
         if snapshot.stats.total_files == 0 {
@@ -56,8 +62,9 @@ fn collect_reachable_blobs(
         };
         if collect_reachable_blobs_from_tree(
             tree_store,
-            &bytes_to_hex(&root_tree_hash),
+            &root_tree_hash,
             &mut reachable,
+            &mut visited,
         )
         .is_err()
         {

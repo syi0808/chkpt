@@ -2,7 +2,7 @@
 
 ## Current Store Layout
 
-chkpt stores data under:
+chkpt stores data under `~/.chkpt/` by default. Set the `CHKPT_HOME` env var to override this location.
 
 ```text
 ~/.chkpt/stores/<project_id>/

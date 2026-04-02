@@ -212,7 +212,7 @@ impl PackReader {
     }
 
     fn compressed_bytes(&self, offset: u64, size: u64) -> Option<&[u8]> {
-        let data_start = offset as usize + 32 + 8; // skip hash + compressed_size
+        let data_start = (offset as usize).checked_add(32 + 8)?; // skip hash + compressed_size
         let data_end = data_start.checked_add(size as usize)?;
         if data_end > self.dat.len() {
             return None;

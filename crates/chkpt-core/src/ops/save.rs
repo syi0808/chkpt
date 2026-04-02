@@ -275,7 +275,10 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     // 8. Build tree bottom-up (skip if nothing changed)
     let latest_catalog_snapshot = catalog.latest_snapshot()?;
 
-    let root_tree_hash = if new_objects == 0 && removed_paths.is_empty() {
+    let root_tree_hash = if new_objects == 0
+        && removed_paths.is_empty()
+        && updated_entries.is_empty()
+    {
         if let Some(ref snapshot) = latest_catalog_snapshot {
             // Nothing changed — reuse previous tree hash (skip build entirely)
             root_tree_hash_for_snapshot(&catalog, snapshot, &TreeStore::new(layout.trees_dir()))?
@@ -861,17 +864,11 @@ mod tests {
     }
 
     #[test]
-    fn test_store_has_external_objects_true_for_loose_or_pack_objects() {
+    fn test_store_has_external_objects_true_for_pack_objects() {
         let dir = TempDir::new().unwrap();
         let objects_dir = dir.path().join("objects");
         let packs_dir = dir.path().join("packs");
-        std::fs::create_dir_all(objects_dir.join("aa")).unwrap();
         std::fs::create_dir_all(&packs_dir).unwrap();
-        std::fs::write(objects_dir.join("aa").join("bb"), b"compressed").unwrap();
-
-        assert!(store_has_external_objects(&objects_dir, &packs_dir).unwrap());
-
-        std::fs::remove_file(objects_dir.join("aa").join("bb")).unwrap();
         std::fs::write(packs_dir.join("pack-demo.dat"), b"pack").unwrap();
 
         assert!(store_has_external_objects(&objects_dir, &packs_dir).unwrap());

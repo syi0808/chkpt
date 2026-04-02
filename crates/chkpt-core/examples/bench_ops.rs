@@ -304,7 +304,7 @@ fn hardlink_group_start(index: usize, hardlink_fanout: usize) -> usize {
 }
 
 fn break_deps_hardlinks(root: &Path, config: BenchConfig, version: usize) -> std::io::Result<()> {
-    if !config.include_deps || config.hardlink_fanout <= 1 {
+    if !config.include_deps || config.hardlink_fanout <= 1 || config.modified_files == 0 {
         return Ok(());
     }
 

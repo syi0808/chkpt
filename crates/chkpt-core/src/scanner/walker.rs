@@ -209,7 +209,7 @@ impl ParallelVisitor for CollectVisitor {
         }
 
         let relative = relative_path(self.root.as_path(), path);
-        let metadata = match std::fs::symlink_metadata(path) {
+        let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(error) => {
                 self.store_error(ChkpttError::Other(error.to_string()));
@@ -259,6 +259,7 @@ fn build_scanned_file(
         .map(|d| (d.as_secs() as i64, d.subsec_nanos() as i64))
         .unwrap_or((0, 0));
 
+    let is_symlink = metadata.file_type().is_symlink();
     ScannedFile {
         relative_path: relative_path.to_string(),
         absolute_path: path.to_path_buf(),
@@ -267,7 +268,7 @@ fn build_scanned_file(
         mtime_nanos,
         device: None,
         inode: None,
-        mode: 0o644,
-        is_symlink: metadata.file_type().is_symlink(),
+        mode: if is_symlink { 0o120000 } else { 0o644 },
+        is_symlink,
     }
 }

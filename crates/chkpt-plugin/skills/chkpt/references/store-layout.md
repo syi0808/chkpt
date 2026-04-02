@@ -2,7 +2,7 @@
 
 ## Current Store Layout
 
-chkpt stores data under:
+chkpt stores data under `~/.chkpt/` by default. Set the `CHKPT_HOME` env var to override this location.
 
 ```text
 ~/.chkpt/stores/<project_id>/
@@ -84,14 +84,7 @@ sqlite3 ~/.chkpt/stores/<project_id>/catalog.sqlite \
 
 ```bash
 sqlite3 ~/.chkpt/stores/<project_id>/catalog.sqlite \
-  "select path, hex(blob_hash), size, mode from snapshot_files where snapshot_id = '<snapshot-id>' order by path;"
-```
-
-If the snapshot reuses another manifest, first resolve the manifest owner:
-
-```bash
-sqlite3 ~/.chkpt/stores/<project_id>/catalog.sqlite \
-  "select id, coalesce(manifest_snapshot_id, id), hex(root_tree_hash) from snapshots where id = '<snapshot-id>';"
+  "select path, hex(blob_hash), size, mode from snapshot_files where snapshot_id = (select coalesce(manifest_snapshot_id, id) from snapshots where id = '<snapshot-id>') order by path;"
 ```
 
 ### Inspect blob locations

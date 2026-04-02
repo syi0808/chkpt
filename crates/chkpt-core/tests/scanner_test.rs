@@ -274,5 +274,5 @@ fn test_scan_excludes_symlink_named_node_modules_by_default() {
 
     assert!(!files
         .iter()
-        .any(|file| file.relative_path == "node_modules"));
+        .any(|file| file.relative_path.starts_with("node_modules")));
 }

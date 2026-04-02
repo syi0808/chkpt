@@ -1369,7 +1369,7 @@ def cmd_compare_commits(args: argparse.Namespace) -> int:
 
     selected = scenario_names_from_args(args.scenarios, DEFAULT_SCENARIOS)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    base_dir = Path(tempfile.mkdtemp(prefix=f"chkpt-ab-{sanitize_label(args.label)}-", dir="/tmp"))
+    base_dir = Path(tempfile.mkdtemp(prefix=f"chkpt-ab-{sanitize_label(args.label)}-"))
     before_worktree = base_dir / "before"
     after_worktree = base_dir / "after"
     before_fixed_bench_ops: Path | None = None
@@ -1467,7 +1467,7 @@ def cmd_compare_commits(args: argparse.Namespace) -> int:
             if worktree.exists():
                 try:
                     remove_worktree(worktree)
-                except subprocess.CalledProcessError:
+                except (RuntimeError, OSError):
                     pass
         shutil.rmtree(base_dir, ignore_errors=True)
 

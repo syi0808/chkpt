@@ -595,15 +595,7 @@ fn path_contains_dependency_dir(relative_path: &str) -> bool {
 }
 
 fn mode_is_symlink(mode: u32) -> bool {
-    #[cfg(unix)]
-    {
-        (mode & 0o170000) == 0o120000
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = mode;
-        false
-    }
+    (mode & 0o170000) == 0o120000
 }
 
 fn restored_index_entries(
@@ -739,6 +731,7 @@ fn scanned_file_from_metadata(
         .map(|duration| (duration.as_secs() as i64, duration.subsec_nanos() as i64))
         .unwrap_or((0, 0));
 
+    let is_symlink = metadata.file_type().is_symlink();
     ScannedFile {
         relative_path,
         absolute_path,
@@ -747,8 +740,8 @@ fn scanned_file_from_metadata(
         mtime_nanos,
         device: None,
         inode: None,
-        mode: 0o644,
-        is_symlink: metadata.file_type().is_symlink(),
+        mode: if is_symlink { 0o120000 } else { 0o644 },
+        is_symlink,
     }
 }
 

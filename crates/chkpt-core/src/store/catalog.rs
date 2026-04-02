@@ -111,6 +111,13 @@ fn row_to_snapshot(row: &Row<'_>) -> rusqlite::Result<CatalogSnapshot> {
 
 fn row_to_manifest_entry(row: &Row<'_>) -> rusqlite::Result<ManifestEntry> {
     let blob_hash: Vec<u8> = row.get(1)?;
+    if blob_hash.len() != 32 {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Blob,
+            format!("expected 32-byte blob hash, got {}", blob_hash.len()).into(),
+        ));
+    }
     let mut hash = [0u8; 32];
     hash.copy_from_slice(&blob_hash);
     Ok(ManifestEntry {
@@ -125,6 +132,13 @@ fn row_to_blob_location(
     hash: Vec<u8>,
     row: &Row<'_>,
 ) -> rusqlite::Result<([u8; 32], BlobLocation)> {
+    if hash.len() != 32 {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Blob,
+            format!("expected 32-byte blob hash, got {}", hash.len()).into(),
+        ));
+    }
     let mut blob_hash = [0u8; 32];
     blob_hash.copy_from_slice(&hash);
     Ok((
@@ -415,6 +429,13 @@ impl MetadataCatalog {
         let hashes = stmt
             .query_map([], |row: &Row<'_>| {
                 let hash: Vec<u8> = row.get(0)?;
+                if hash.len() != 32 {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Blob,
+                        format!("expected 32-byte blob hash, got {}", hash.len()).into(),
+                    ));
+                }
                 let mut blob_hash = [0u8; 32];
                 blob_hash.copy_from_slice(&hash);
                 Ok(blob_hash)

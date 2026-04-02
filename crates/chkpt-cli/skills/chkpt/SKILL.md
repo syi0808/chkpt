@@ -53,7 +53,7 @@ See `references/cli-commands.md` for argument details and output formats.
 When the user wants to examine checkpoint internals:
 
 1. Use `chkpt list --full` first so you know the real snapshot IDs in the current workspace
-2. Inspect candidate stores under `~/.chkpt/stores/*/catalog.sqlite`
+2. Inspect candidate stores under `${CHKPT_HOME:-~/.chkpt}/stores/*/catalog.sqlite`
 3. Match the workspace store by querying `snapshots` and comparing IDs or timestamps from `chkpt list --full`
 4. Inspect `snapshot_files`, `blob_index`, `packs/`, and `trees/` as needed
 

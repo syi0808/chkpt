@@ -277,8 +277,11 @@ fn manifest_path(index: usize) -> String {
 
 fn hash_bytes(index: usize) -> [u8; 32] {
     let mut hash = [0u8; 32];
+    let ib = index.to_le_bytes();
     for (offset, byte) in hash.iter_mut().enumerate() {
-        *byte = index.wrapping_mul(131).wrapping_add(offset) as u8;
+        *byte = ib[offset % ib.len()]
+            .wrapping_mul(131)
+            .wrapping_add(offset as u8);
     }
     hash
 }

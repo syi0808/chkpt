@@ -231,6 +231,7 @@ The main core errors are:
 - `Bitcode`
 - `SnapshotNotFound`
 - `LockHeld`
+- `GuardrailExceeded`
 - `StoreCorrupted`
 - `ObjectNotFound`
 - `RestoreFailed`
