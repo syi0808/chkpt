@@ -309,6 +309,7 @@ fn resolve_restore_sources(
 ) -> Result<(PackSet, HashMap<[u8; 32], RestoreSource>)> {
     let candidate_count = files_to_add.len() + files_to_change.len();
     let mut sources = HashMap::with_capacity(candidate_count);
+    let mut seen_hashes = HashSet::with_capacity(candidate_count);
     let mut packed_hashes = Vec::with_capacity(candidate_count);
     let mut packed_hash_hexes = HashMap::with_capacity(candidate_count);
 
@@ -316,7 +317,7 @@ fn resolve_restore_sources(
         let target = target_state
             .get(path)
             .expect("target hash missing for restore source");
-        if sources.contains_key(&target.hash) || packed_hash_hexes.contains_key(&target.hash) {
+        if !seen_hashes.insert(target.hash) {
             continue;
         }
 

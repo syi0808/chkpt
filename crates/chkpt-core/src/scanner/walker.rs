@@ -77,7 +77,7 @@ pub fn walk_parallel(
         return Err(error);
     }
 
-    let mut files = files.lock().unwrap().clone();
+    let mut files = std::mem::take(&mut *files.lock().unwrap());
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(files)
 }
