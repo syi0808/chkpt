@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 fn bytes_to_hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    blake3::Hash::from(*bytes).to_hex().to_string()
 }
 
 pub fn delete(workspace_root: &Path, snapshot_id: &str) -> Result<()> {
@@ -38,11 +38,15 @@ pub fn delete(workspace_root: &Path, snapshot_id: &str) -> Result<()> {
         if catalog.pack_reference_count(&pack_hash)? == 0 {
             let dat_path = layout.packs_dir().join(format!("pack-{}.dat", pack_hash));
             let idx_path = layout.packs_dir().join(format!("pack-{}.idx", pack_hash));
-            if dat_path.exists() {
-                std::fs::remove_file(dat_path)?;
+            match std::fs::remove_file(dat_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
-            if idx_path.exists() {
-                std::fs::remove_file(idx_path)?;
+            match std::fs::remove_file(idx_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
         }
     }
