@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -337,6 +338,12 @@ def parse_args() -> argparse.Namespace:
     )
     compare_parser.add_argument("--before", required=True, help="Path to an earlier run dir or results.json.")
     compare_parser.add_argument("--after", required=True, help="Path to a later run dir or results.json.")
+    compare_parser.add_argument(
+        "--stat",
+        choices=["median", "average"],
+        default="median",
+        help="Primary statistic to compare for iterative benchmarks. Defaults to median.",
+    )
     compare_parser.add_argument("--output", help="Optional path to write the rendered Markdown report.")
 
     return parser.parse_args()
@@ -490,6 +497,33 @@ def parse_key_values(line: str) -> dict[str, float]:
     return {key: float(value) for key, value in pairs.items()}
 
 
+def summarize_iterations(iterations: list[dict[str, float]]) -> dict[str, dict[str, float]]:
+    metrics: dict[str, list[float]] = {}
+    for iteration in iterations:
+        for key, value in iteration.items():
+            if key == "iteration":
+                continue
+            metrics.setdefault(key, []).append(value)
+
+    summary: dict[str, dict[str, float]] = {}
+    for key, values in metrics.items():
+        if not values:
+            continue
+        median = statistics.median(values)
+        mad = statistics.median(abs(value - median) for value in values)
+        summary[key] = {
+            "samples": float(len(values)),
+            "mean": statistics.fmean(values),
+            "median": median,
+            "min": min(values),
+            "max": max(values),
+            "mad": mad,
+            "relative_mad_pct": 0.0 if median == 0 else mad / median * 100.0,
+            "span_pct": 0.0 if median == 0 else (max(values) - min(values)) / median * 100.0,
+        }
+    return summary
+
+
 def parse_bench_ops(output: str) -> dict[str, Any]:
     config: dict[str, float] | None = None
     iterations: list[dict[str, float]] = []
@@ -515,6 +549,7 @@ def parse_bench_ops(output: str) -> dict[str, Any]:
         "config": config,
         "iterations": iterations,
         "average": average,
+        "summary": summarize_iterations(iterations),
         "resources": resources,
     }
 
@@ -544,6 +579,7 @@ def parse_bench_catalog(output: str) -> dict[str, Any]:
         "config": config,
         "iterations": iterations,
         "average": average,
+        "summary": summarize_iterations(iterations),
         "resources": resources,
     }
 
@@ -681,8 +717,37 @@ def load_result(path_str: str) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def render_metric_table(rows: list[tuple[str, float, float]]) -> str:
-    lines = ["| Metric | Before | After | Delta |", "|---|---:|---:|---:|"]
+def metric_summary(parsed: dict[str, Any]) -> dict[str, dict[str, float]]:
+    summary = parsed.get("summary")
+    if summary:
+        return summary
+    iterations = parsed.get("iterations", [])
+    if isinstance(iterations, list):
+        return summarize_iterations(iterations)
+    return {}
+
+
+def metric_value(parsed: dict[str, Any], key: str, stat: str) -> float | None:
+    if stat == "median":
+        summary = metric_summary(parsed).get(key)
+        if summary is not None:
+            return float(summary["median"])
+
+    average = parsed.get("average", {})
+    if key in average:
+        return float(average[key])
+
+    summary = metric_summary(parsed).get(key)
+    if summary is not None:
+        return float(summary["mean"])
+    return None
+
+
+def render_metric_table(rows: list[tuple[str, float, float]], stat_label: str) -> str:
+    lines = [
+        f"| Metric | Before ({stat_label}) | After ({stat_label}) | Delta |",
+        "|---|---:|---:|---:|",
+    ]
     for label, before, after in rows:
         delta = after - before
         pct = 0.0 if before == 0 else delta / before * 100.0
@@ -690,16 +755,44 @@ def render_metric_table(rows: list[tuple[str, float, float]]) -> str:
     return "\n".join(lines)
 
 
-def compare_runs(before: dict[str, Any], after: dict[str, Any]) -> str:
+def collect_instability_notes(
+    scenario_name: str,
+    parsed: dict[str, Any],
+    metrics: list[str],
+    label: str,
+) -> list[str]:
+    notes: list[str] = []
+    summary = metric_summary(parsed)
+    for metric in metrics:
+        metric_stats = summary.get(metric)
+        if metric_stats is None:
+            continue
+        if metric_stats["samples"] < 3:
+            continue
+        span_pct = metric_stats["span_pct"]
+        rel_mad_pct = metric_stats["relative_mad_pct"]
+        if span_pct < 15.0 and rel_mad_pct < 5.0:
+            continue
+        notes.append(
+            f"- `{scenario_name}.{metric}` {label}: median `{metric_stats['median']:.2f}`, "
+            f"min/max `{metric_stats['min']:.2f}`/`{metric_stats['max']:.2f}`, "
+            f"MAD `{metric_stats['mad']:.2f}` ({rel_mad_pct:.1f}%), span `{span_pct:.1f}%`"
+        )
+    return notes
+
+
+def compare_runs(before: dict[str, Any], after: dict[str, Any], stat: str) -> str:
     before_scenarios = {entry["name"]: entry for entry in before["results"]}
     after_scenarios = {entry["name"]: entry for entry in after["results"]}
     shared = [name for name in before_scenarios if name in after_scenarios]
+    stat_label = "median" if stat == "median" else "average"
 
     lines = [
         f"# Benchmark Comparison: {before['label']} -> {after['label']}",
         "",
         f"- Before: `{before['git']['commit'][:12]}` on `{before['git']['branch']}`",
         f"- After: `{after['git']['commit'][:12]}` on `{after['git']['branch']}`",
+        f"- Primary statistic: `{stat_label}`",
         f"- Generated at: `{datetime.now(timezone.utc).isoformat()}`",
         "",
     ]
@@ -731,19 +824,28 @@ def compare_runs(before: dict[str, Any], after: dict[str, Any]) -> str:
                     ("snapshot_manifest_ms", "snapshot_manifest_ms"),
                     ("blob_lookup_ms", "blob_lookup_ms"),
                 ]
-            rows = [
-                (
-                    label,
-                    float(left["parsed"]["average"][key]),
-                    float(right["parsed"]["average"][key]),
-                )
-                for key, label in order
-            ]
+            rows = []
+            compared_metrics: list[str] = []
+            for key, label in order:
+                left_value = metric_value(left["parsed"], key, stat)
+                right_value = metric_value(right["parsed"], key, stat)
+                if left_value is None or right_value is None:
+                    continue
+                rows.append((label, left_value, right_value))
+                compared_metrics.append(key)
             left_rss = left["parsed"].get("resources", {}).get("peak_rss_kb")
             right_rss = right["parsed"].get("resources", {}).get("peak_rss_kb")
             if left_rss is not None and right_rss is not None:
                 rows.append(("peak_rss_mib", float(left_rss) / 1024.0, float(right_rss) / 1024.0))
-            lines.append(render_metric_table(rows))
+            lines.append(render_metric_table(rows, stat_label))
+            instability_notes = collect_instability_notes(name, left["parsed"], compared_metrics, "before")
+            instability_notes.extend(
+                collect_instability_notes(name, right["parsed"], compared_metrics, "after")
+            )
+            if instability_notes:
+                lines.append("")
+                lines.append("Noise Notes:")
+                lines.extend(instability_notes)
         else:
             variant_order = [
                 ("scan_ms", "scan_ms"),
@@ -774,7 +876,7 @@ def compare_runs(before: dict[str, Any], after: dict[str, Any]) -> str:
             right_rss = right["parsed"].get("resources", {}).get("peak_rss_kb")
             if left_rss is not None and right_rss is not None:
                 rows.append(("peak_rss_mib", float(left_rss) / 1024.0, float(right_rss) / 1024.0))
-            lines.append(render_metric_table(rows))
+            lines.append(render_metric_table(rows, stat_label))
             before_best = left["parsed"]["variants"].get("best_thread_count")
             after_best = right["parsed"]["variants"].get("best_thread_count")
             if before_best is not None or after_best is not None:
@@ -914,7 +1016,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_compare(args: argparse.Namespace) -> int:
     before = load_result(args.before)
     after = load_result(args.after)
-    rendered = compare_runs(before, after)
+    rendered = compare_runs(before, after, args.stat)
     if args.output:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
