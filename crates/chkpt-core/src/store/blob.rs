@@ -166,10 +166,12 @@ impl BlobStore {
     /// List all loose object hashes.
     pub fn list_loose(&self) -> Result<Vec<String>> {
         let mut hashes = Vec::new();
-        if !self.base_dir.exists() {
-            return Ok(hashes);
-        }
-        for prefix_entry in std::fs::read_dir(&self.base_dir)? {
+        let prefix_entries = match std::fs::read_dir(&self.base_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(hashes),
+            Err(error) => return Err(error.into()),
+        };
+        for prefix_entry in prefix_entries {
             let prefix_entry = prefix_entry?;
             if !prefix_entry.file_type()?.is_dir() {
                 continue;

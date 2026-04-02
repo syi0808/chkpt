@@ -833,10 +833,12 @@ fn scanned_file_from_metadata(
 }
 
 fn blob_store_has_loose_objects(objects_dir: &Path) -> Result<bool> {
-    if !objects_dir.exists() {
-        return Ok(false);
-    }
-    for prefix_entry in std::fs::read_dir(objects_dir)? {
+    let prefix_entries = match std::fs::read_dir(objects_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    for prefix_entry in prefix_entries {
         let prefix_entry = prefix_entry?;
         if !prefix_entry.file_type()?.is_dir() {
             continue;

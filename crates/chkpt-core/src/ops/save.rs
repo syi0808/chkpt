@@ -372,11 +372,13 @@ fn store_has_external_objects(objects_dir: &Path, packs_dir: &Path) -> Result<bo
 }
 
 fn store_has_loose_objects(objects_dir: &Path) -> Result<bool> {
-    if !objects_dir.exists() {
-        return Ok(false);
-    }
+    let prefix_entries = match std::fs::read_dir(objects_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
 
-    for prefix_entry in std::fs::read_dir(objects_dir)? {
+    for prefix_entry in prefix_entries {
         let prefix_entry = prefix_entry?;
         if !prefix_entry.file_type()?.is_dir() {
             continue;
@@ -396,11 +398,13 @@ fn store_has_loose_objects(objects_dir: &Path) -> Result<bool> {
 }
 
 fn store_has_pack_objects(packs_dir: &Path) -> Result<bool> {
-    if !packs_dir.exists() {
-        return Ok(false);
-    }
+    let entries = match std::fs::read_dir(packs_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
 
-    for entry in std::fs::read_dir(packs_dir)? {
+    for entry in entries {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;

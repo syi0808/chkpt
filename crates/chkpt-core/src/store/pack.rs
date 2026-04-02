@@ -335,10 +335,12 @@ impl PackSet {
 /// List all pack hashes in a directory.
 pub fn list_packs(packs_dir: &Path) -> Result<Vec<String>> {
     let mut packs = Vec::new();
-    if !packs_dir.exists() {
-        return Ok(packs);
-    }
-    for entry in std::fs::read_dir(packs_dir)? {
+    let entries = match std::fs::read_dir(packs_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(packs),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();

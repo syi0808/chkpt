@@ -22,16 +22,17 @@ pub struct FileIndex {
 impl FileIndex {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let entries = if path.exists() {
-            let data = std::fs::read(&path)?;
-            let entries_vec: Vec<FileEntry> = bitcode::decode(&data)?;
-            let mut entries = HashMap::with_capacity(entries_vec.len());
-            for entry in entries_vec {
-                entries.insert(entry.path.clone(), entry);
+        let entries = match std::fs::read(&path) {
+            Ok(data) => {
+                let entries_vec: Vec<FileEntry> = bitcode::decode(&data)?;
+                let mut entries = HashMap::with_capacity(entries_vec.len());
+                for entry in entries_vec {
+                    entries.insert(entry.path.clone(), entry);
+                }
+                entries
             }
-            entries
-        } else {
-            HashMap::new()
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => return Err(error.into()),
         };
         Ok(Self { path, entries })
     }

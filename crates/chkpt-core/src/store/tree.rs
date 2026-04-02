@@ -49,19 +49,23 @@ impl TreeStore {
         let dat_path = base_dir.join("trees.dat");
         let idx_path = base_dir.join("trees.idx");
 
-        let (pack_dat, pack_idx, pack_entry_count) = if dat_path.exists() && idx_path.exists() {
-            match (
-                std::fs::File::open(&dat_path).and_then(|f| unsafe { Mmap::map(&f) }),
-                std::fs::File::open(&idx_path).and_then(|f| unsafe { Mmap::map(&f) }),
+        let (pack_dat, pack_idx, pack_entry_count) = match (
+            std::fs::File::open(&dat_path),
+            std::fs::File::open(&idx_path),
+        ) {
+            (Ok(dat_file), Ok(idx_file)) => match (
+                unsafe { Mmap::map(&dat_file) },
+                unsafe { Mmap::map(&idx_file) },
             ) {
                 (Ok(dat), Ok(idx)) => {
                     let count = idx.len() / TREE_IDX_ENTRY_SIZE;
                     (Some(dat), Some(idx), count)
                 }
                 _ => (None, None, 0),
-            }
-        } else {
-            (None, None, 0)
+            },
+            (Err(dat_error), _) if dat_error.kind() == std::io::ErrorKind::NotFound => (None, None, 0),
+            (_, Err(idx_error)) if idx_error.kind() == std::io::ErrorKind::NotFound => (None, None, 0),
+            _ => (None, None, 0),
         };
 
         Self {
@@ -270,10 +274,12 @@ impl TreeStore {
     /// List all loose tree hashes.
     pub fn list_loose(&self) -> Result<Vec<String>> {
         let mut hashes = Vec::new();
-        if !self.base_dir.exists() {
-            return Ok(hashes);
-        }
-        for prefix_entry in std::fs::read_dir(&self.base_dir)? {
+        let prefix_entries = match std::fs::read_dir(&self.base_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(hashes),
+            Err(error) => return Err(error.into()),
+        };
+        for prefix_entry in prefix_entries {
             let prefix_entry = prefix_entry?;
             if !prefix_entry.file_type()?.is_dir() {
                 continue;
