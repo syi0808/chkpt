@@ -64,7 +64,7 @@ struct RestoreTask {
 
 /// Convert a [u8; 32] to a 64-char hex string.
 fn bytes_to_hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    blake3::Hash::from(*bytes).to_hex().to_string()
 }
 
 /// Recursively walk a tree and collect all file entries as (relative_path, blob_hash_hex).
