@@ -340,14 +340,15 @@ pub fn list_packs(packs_dir: &Path) -> Result<Vec<String>> {
     }
     for entry in std::fs::read_dir(packs_dir)? {
         let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
         if name.starts_with("pack-") && name.ends_with(".dat") {
             let hash = name
                 .strip_prefix("pack-")
                 .unwrap()
                 .strip_suffix(".dat")
                 .unwrap();
-            packs.push(hash.to_string());
+            packs.push(hash.to_owned());
         }
     }
     Ok(packs)
@@ -402,5 +403,5 @@ fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {
 }
 
 fn bytes_to_hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    blake3::Hash::from(*bytes).to_hex().to_string()
 }
