@@ -76,8 +76,10 @@ impl SnapshotStore {
 
     fn clear_latest_id(&self) -> Result<()> {
         let latest_path = self.latest_path();
-        if latest_path.exists() {
-            std::fs::remove_file(latest_path)?;
+        if let Err(error) = std::fs::remove_file(latest_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error.into());
+            }
         }
         Ok(())
     }
@@ -113,21 +115,23 @@ impl SnapshotStore {
             }
         }
         let latest_path = self.latest_path();
-        if latest_path.exists() {
-            let latest_id = std::fs::read_to_string(&latest_path)?;
-            if latest_id.trim() == id {
-                self.clear_latest_id()?;
-            }
+        match std::fs::read_to_string(&latest_path) {
+            Ok(latest_id) if latest_id.trim() == id => self.clear_latest_id()?,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         Ok(())
     }
 
     pub fn list(&self, limit: Option<usize>) -> Result<Vec<Snapshot>> {
         let mut snapshots = Vec::new();
-        if !self.dir.exists() {
-            return Ok(snapshots);
-        }
-        for entry in std::fs::read_dir(&self.dir)? {
+        let read_dir = match std::fs::read_dir(&self.dir) {
+            Ok(read_dir) => read_dir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(snapshots),
+            Err(error) => return Err(error.into()),
+        };
+        for entry in read_dir {
             let entry = entry?;
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json") {
@@ -146,14 +150,17 @@ impl SnapshotStore {
 
     pub fn latest(&self) -> Result<Option<Snapshot>> {
         let latest_path = self.latest_path();
-        if latest_path.exists() {
-            let snapshot_id = std::fs::read_to_string(&latest_path)?;
-            let snapshot_id = snapshot_id.trim();
-            if !snapshot_id.is_empty() {
-                if let Ok(snapshot) = self.load(snapshot_id) {
-                    return Ok(Some(snapshot));
+        match std::fs::read_to_string(&latest_path) {
+            Ok(snapshot_id) => {
+                let snapshot_id = snapshot_id.trim();
+                if !snapshot_id.is_empty() {
+                    if let Ok(snapshot) = self.load(snapshot_id) {
+                        return Ok(Some(snapshot));
+                    }
                 }
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
 
         let latest = self.list(Some(1))?.into_iter().next();
