@@ -143,7 +143,7 @@ fn scan_current_state(
 ) -> Result<BTreeMap<String, CurrentFileState>> {
     let scanned = crate::scanner::scan_workspace_with_options(workspace_root, None, include_deps)?;
     let mut state = BTreeMap::new();
-    let mut stale_files = Vec::new();
+    let mut stale_files = Vec::with_capacity(scanned.len());
 
     for file in scanned {
         if let Some(hash) = cached_hash_bytes(&file, cached_entries) {
@@ -592,8 +592,10 @@ pub fn restore(
     // 8b. Remove files that are not in the target snapshot
     for path in &files_to_remove {
         let file_path = workspace_root.join(path);
-        if file_path.exists() {
-            std::fs::remove_file(&file_path)?;
+        match std::fs::remove_file(&file_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         let completed = restore_progress.fetch_add(1, Ordering::Relaxed) + 1;
         emit(
@@ -755,7 +757,7 @@ fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFil
 
     let chunk_size = scanned_files.len().div_ceil(worker_count);
     std::thread::scope(|scope| {
-        let mut workers = Vec::new();
+        let mut workers = Vec::with_capacity(scanned_files.len().div_ceil(chunk_size));
         for chunk in scanned_files.chunks(chunk_size) {
             workers.push(scope.spawn(move || -> Result<Vec<(ScannedFile, [u8; 32])>> {
                 chunk
@@ -856,7 +858,7 @@ fn cleanup_removed_file_parents(root: &Path, removed_paths: &[String]) -> Result
         return Ok(());
     }
 
-    let mut candidates = HashSet::new();
+    let mut candidates = HashSet::with_capacity(removed_paths.len());
     for removed_path in removed_paths {
         let mut current = root.join(removed_path);
         while let Some(parent) = current.parent() {
