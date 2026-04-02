@@ -400,7 +400,8 @@ fn store_has_pack_objects(packs_dir: &Path) -> Result<bool> {
             continue;
         }
 
-        let name = entry.file_name().to_string_lossy().to_string();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
         if name.starts_with("pack-") && name.ends_with(".dat") {
             return Ok(true);
         }
