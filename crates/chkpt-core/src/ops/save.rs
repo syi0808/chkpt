@@ -234,7 +234,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
                 let exists_loose = has_loose_objects && blob_store.exists(&blob_hash_hex);
                 let exists_in_pack = pack_set
                     .as_ref()
-                    .is_some_and(|ps| ps.contains(&blob_hash_hex));
+                    .is_some_and(|ps| ps.contains_bytes(&blob_hash_bytes));
                 if exists_loose {
                     blob_locations_to_record.push((
                         blob_hash_bytes,
@@ -244,7 +244,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
                         },
                     ));
                 } else if !exists_in_pack {
-                    pack_writer.add_pre_compressed(blob_hash_hex, compressed)?;
+                    pack_writer.add_pre_compressed_bytes(blob_hash_bytes, compressed)?;
                     new_blob_records.push(NewBlobRecord {
                         blob_hash: blob_hash_bytes,
                         size,

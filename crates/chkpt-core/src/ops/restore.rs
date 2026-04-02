@@ -311,7 +311,6 @@ fn resolve_restore_sources(
     let mut sources = HashMap::with_capacity(candidate_count);
     let mut seen_hashes = HashSet::with_capacity(candidate_count);
     let mut packed_hashes = Vec::with_capacity(candidate_count);
-    let mut packed_hash_hexes = HashMap::with_capacity(candidate_count);
 
     for path in files_to_add.iter().chain(files_to_change.iter()) {
         let target = target_state
@@ -326,7 +325,6 @@ fn resolve_restore_sources(
             sources.insert(target.hash, RestoreSource::Loose);
         } else {
             packed_hashes.push(target.hash);
-            packed_hash_hexes.insert(target.hash, hash_hex);
         }
     }
 
@@ -359,19 +357,16 @@ fn resolve_restore_sources(
     };
 
     for hash in packed_hashes {
-        let hash_hex = packed_hash_hexes
-            .remove(&hash)
-            .expect("packed hash missing hex encoding");
         let location = if can_selectively_open {
             let pack_hash = blob_locations
                 .get(&hash)
                 .and_then(|location| location.pack_hash.as_ref())
                 .expect("selective pack hash missing");
-            pack_set.locate_in_pack(pack_hash, &hash_hex)
+            pack_set.locate_in_pack_bytes(pack_hash, &hash)
         } else {
-            pack_set.locate(&hash_hex)
+            pack_set.locate_bytes(&hash)
         }
-        .ok_or_else(|| ChkpttError::ObjectNotFound(hash_hex.clone()))?;
+        .ok_or_else(|| ChkpttError::ObjectNotFound(bytes_to_hex(&hash)))?;
         sources.insert(hash, RestoreSource::Packed(location));
     }
 

@@ -55,13 +55,18 @@ impl PackWriter {
 
     pub fn add(&mut self, content: &[u8]) -> Result<String> {
         let hash_hex = hash_content(content);
+        let hash = hex_to_bytes(&hash_hex)?;
         let compressed = zstd::encode_all(content, 1)?;
-        self.add_pre_compressed(hash_hex.clone(), compressed)?;
+        self.add_pre_compressed_bytes(hash, compressed)?;
         Ok(hash_hex)
     }
 
     pub fn add_pre_compressed(&mut self, hash_hex: String, compressed: Vec<u8>) -> Result<()> {
         let hash = hex_to_bytes(&hash_hex)?;
+        self.add_pre_compressed_bytes(hash, compressed)
+    }
+
+    pub fn add_pre_compressed_bytes(&mut self, hash: [u8; 32], compressed: Vec<u8>) -> Result<()> {
         let compressed_len = compressed.len() as u64;
 
         // Write entry to BufWriter: hash(32) + compressed_len(8) + data(N)
@@ -80,7 +85,6 @@ impl PackWriter {
             size: compressed_len,
         });
         self.offset += 32 + 8 + compressed_len;
-
         Ok(())
     }
 
@@ -183,14 +187,13 @@ impl PackReader {
     }
 
     /// Binary search for hash in the mmap'd index.
-    fn find(&self, hash_hex: &str) -> Option<IndexEntry> {
-        let hash_bytes = hex_to_bytes(hash_hex).ok()?;
+    fn find_bytes(&self, hash_bytes: &[u8; 32]) -> Option<IndexEntry> {
         let mut lo = 0usize;
         let mut hi = self.entry_count;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let mid_hash = &self.idx[mid * IDX_ENTRY_SIZE..mid * IDX_ENTRY_SIZE + 32];
-            match mid_hash.cmp(&hash_bytes) {
+            match mid_hash.cmp(&hash_bytes[..]) {
                 std::cmp::Ordering::Equal => return Some(self.idx_entry(mid)),
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
@@ -199,8 +202,17 @@ impl PackReader {
         None
     }
 
+    fn find(&self, hash_hex: &str) -> Option<IndexEntry> {
+        let hash_bytes = hex_to_bytes(hash_hex).ok()?;
+        self.find_bytes(&hash_bytes)
+    }
+
     pub fn contains(&self, hash_hex: &str) -> bool {
         self.find(hash_hex).is_some()
+    }
+
+    pub fn contains_bytes(&self, hash: &[u8; 32]) -> bool {
+        self.find_bytes(hash).is_some()
     }
 
     fn compressed_bytes(&self, offset: u64, size: u64) -> Option<&[u8]> {
@@ -289,6 +301,10 @@ impl PackSet {
         self.readers.iter().any(|reader| reader.contains(hash_hex))
     }
 
+    pub fn contains_bytes(&self, hash: &[u8; 32]) -> bool {
+        self.readers.iter().any(|reader| reader.contains_bytes(hash))
+    }
+
     pub fn read(&self, hash_hex: &str) -> Result<Vec<u8>> {
         self.try_read(hash_hex)
             .ok_or_else(|| ChkpttError::ObjectNotFound(hash_hex.to_string()))
@@ -307,10 +323,27 @@ impl PackSet {
             })
     }
 
-    pub(crate) fn locate_in_pack(&self, pack_hash: &str, hash_hex: &str) -> Option<PackLocation> {
+    pub(crate) fn locate_bytes(&self, hash: &[u8; 32]) -> Option<PackLocation> {
+        self.readers
+            .iter()
+            .enumerate()
+            .find_map(|(reader_index, reader)| {
+                reader.find_bytes(hash).map(|entry| PackLocation {
+                    reader_index,
+                    offset: entry.offset,
+                    size: entry.size,
+                })
+            })
+    }
+
+    pub(crate) fn locate_in_pack_bytes(
+        &self,
+        pack_hash: &str,
+        hash: &[u8; 32],
+    ) -> Option<PackLocation> {
         let reader_index = *self.reader_indices.get(pack_hash)?;
         let reader = self.readers.get(reader_index)?;
-        reader.find(hash_hex).map(|entry| PackLocation {
+        reader.find_bytes(hash).map(|entry| PackLocation {
             reader_index,
             offset: entry.offset,
             size: entry.size,
