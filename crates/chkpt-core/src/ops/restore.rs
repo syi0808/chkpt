@@ -299,9 +299,10 @@ fn resolve_restore_sources(
     catalog: &MetadataCatalog,
     packs_dir: &Path,
 ) -> Result<(PackSet, HashMap<[u8; 32], RestoreSource>)> {
-    let mut sources = HashMap::new();
-    let mut packed_hashes = Vec::new();
-    let mut packed_hash_hexes = HashMap::new();
+    let candidate_count = files_to_add.len() + files_to_change.len();
+    let mut sources = HashMap::with_capacity(candidate_count);
+    let mut packed_hashes = Vec::with_capacity(candidate_count);
+    let mut packed_hash_hexes = HashMap::with_capacity(candidate_count);
 
     for path in files_to_add.iter().chain(files_to_change.iter()) {
         let target = target_state
@@ -325,7 +326,7 @@ fn resolve_restore_sources(
     }
 
     let blob_locations = catalog.blob_locations_for_hashes(&packed_hashes)?;
-    let mut selected_pack_hashes = HashSet::new();
+    let mut selected_pack_hashes = HashSet::with_capacity(packed_hashes.len());
     let mut can_selectively_open = true;
 
     for hash in &packed_hashes {
