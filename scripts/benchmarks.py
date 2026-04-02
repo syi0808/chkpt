@@ -9,6 +9,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -346,6 +347,39 @@ def parse_args() -> argparse.Namespace:
     )
     compare_parser.add_argument("--output", help="Optional path to write the rendered Markdown report.")
 
+    compare_commits_parser = subparsers.add_parser(
+        "compare-commits",
+        help="Build two refs once, run them in alternating order, and render a comparison report.",
+    )
+    compare_commits_parser.add_argument("--before-ref", required=True, help="Git ref for the baseline.")
+    compare_commits_parser.add_argument("--after-ref", required=True, help="Git ref for the candidate.")
+    compare_commits_parser.add_argument("--label", required=True, help="Human-readable label for this run.")
+    compare_commits_parser.add_argument(
+        "--scenario",
+        action="append",
+        dest="scenarios",
+        choices=sorted(SCENARIOS.keys()),
+        help="Only run the selected scenario. Repeat to select multiple scenarios.",
+    )
+    compare_commits_parser.add_argument(
+        "--rounds",
+        type=int,
+        default=2,
+        help="Number of alternating A/B rounds. Default: 2.",
+    )
+    compare_commits_parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="Skip the upfront release build in each worktree and use existing build artifacts.",
+    )
+    compare_commits_parser.add_argument(
+        "--stat",
+        choices=["median", "average"],
+        default="median",
+        help="Primary statistic to compare for the final report. Defaults to median.",
+    )
+    compare_commits_parser.add_argument("--output", help="Optional path to write the rendered Markdown report.")
+
     return parser.parse_args()
 
 
@@ -479,10 +513,10 @@ def create_hardlink_modules_fixture(spec: FixtureSpec, workspace_dir: Path, stor
         encoding="utf-8",
     )
 
-def run_command(cmd: list[str], env: dict[str, str]) -> str:
+def run_command(cmd: list[str], env: dict[str, str], cwd: Path = REPO_ROOT) -> str:
     completed = subprocess.run(
         cmd,
-        cwd=REPO_ROOT,
+        cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -497,6 +531,23 @@ def parse_key_values(line: str) -> dict[str, float]:
     return {key: float(value) for key, value in pairs.items()}
 
 
+def summarize_values(values: list[float]) -> dict[str, float]:
+    if not values:
+        return {}
+    median = statistics.median(values)
+    mad = statistics.median(abs(value - median) for value in values)
+    return {
+        "samples": float(len(values)),
+        "mean": statistics.fmean(values),
+        "median": median,
+        "min": min(values),
+        "max": max(values),
+        "mad": mad,
+        "relative_mad_pct": 0.0 if median == 0 else mad / median * 100.0,
+        "span_pct": 0.0 if median == 0 else (max(values) - min(values)) / median * 100.0,
+    }
+
+
 def summarize_iterations(iterations: list[dict[str, float]]) -> dict[str, dict[str, float]]:
     metrics: dict[str, list[float]] = {}
     for iteration in iterations:
@@ -509,19 +560,27 @@ def summarize_iterations(iterations: list[dict[str, float]]) -> dict[str, dict[s
     for key, values in metrics.items():
         if not values:
             continue
-        median = statistics.median(values)
-        mad = statistics.median(abs(value - median) for value in values)
-        summary[key] = {
-            "samples": float(len(values)),
-            "mean": statistics.fmean(values),
-            "median": median,
-            "min": min(values),
-            "max": max(values),
-            "mad": mad,
-            "relative_mad_pct": 0.0 if median == 0 else mad / median * 100.0,
-            "span_pct": 0.0 if median == 0 else (max(values) - min(values)) / median * 100.0,
-        }
+        summary[key] = summarize_values(values)
     return summary
+
+
+def summarize_sample_dicts(
+    samples: list[dict[str, float]],
+) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    metrics: dict[str, list[float]] = {}
+    for sample in samples:
+        for key, value in sample.items():
+            metrics.setdefault(key, []).append(value)
+
+    average: dict[str, float] = {}
+    summary: dict[str, dict[str, float]] = {}
+    for key, values in metrics.items():
+        if not values:
+            continue
+        metric_summary = summarize_values(values)
+        average[key] = metric_summary["mean"]
+        summary[key] = metric_summary
+    return average, summary
 
 
 def parse_bench_ops(output: str) -> dict[str, Any]:
@@ -551,6 +610,11 @@ def parse_bench_ops(output: str) -> dict[str, Any]:
         "average": average,
         "summary": summarize_iterations(iterations),
         "resources": resources,
+        "resource_summary": {
+            "peak_rss_kb": summarize_values([resources["peak_rss_kb"]])
+        }
+        if "peak_rss_kb" in resources
+        else {},
     }
 
 
@@ -581,6 +645,11 @@ def parse_bench_catalog(output: str) -> dict[str, Any]:
         "average": average,
         "summary": summarize_iterations(iterations),
         "resources": resources,
+        "resource_summary": {
+            "peak_rss_kb": summarize_values([resources["peak_rss_kb"]])
+        }
+        if "peak_rss_kb" in resources
+        else {},
     }
 
 
@@ -683,17 +752,27 @@ def parse_save_pipeline(output: str) -> dict[str, Any]:
 
     return {
         "phases": phases,
+        "phase_summary": {key: summarize_values([float(value)]) for key, value in phases.items()},
         "index_breakdown": index_breakdown,
+        "index_breakdown_summary": {
+            key: summarize_values([float(value)]) for key, value in index_breakdown.items()
+        },
         "variants": variants,
+        "variant_summary": {key: summarize_values([float(value)]) for key, value in variants.items()},
         "metadata": metadata,
         "resources": resources,
+        "resource_summary": {
+            "peak_rss_kb": summarize_values([float(resources["peak_rss_kb"])])
+        }
+        if "peak_rss_kb" in resources
+        else {},
     }
 
 
-def git_info() -> dict[str, str]:
+def git_info(repo_root: Path = REPO_ROOT) -> dict[str, str]:
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -701,7 +780,7 @@ def git_info() -> dict[str, str]:
     ).stdout.strip()
     branch = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=REPO_ROOT,
+        cwd=repo_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -738,6 +817,44 @@ def metric_value(parsed: dict[str, Any], key: str, stat: str) -> float | None:
         return float(average[key])
 
     summary = metric_summary(parsed).get(key)
+    if summary is not None:
+        return float(summary["mean"])
+    return None
+
+
+def nested_metric_value(
+    parsed: dict[str, Any],
+    group_key: str,
+    summary_key: str,
+    metric_key: str,
+    stat: str,
+) -> float | None:
+    if stat == "median":
+        summary = parsed.get(summary_key, {}).get(metric_key)
+        if summary is not None:
+            return float(summary["median"])
+
+    group = parsed.get(group_key, {})
+    if metric_key in group:
+        return float(group[metric_key])
+
+    summary = parsed.get(summary_key, {}).get(metric_key)
+    if summary is not None:
+        return float(summary["mean"])
+    return None
+
+
+def resource_value(parsed: dict[str, Any], key: str, stat: str) -> float | None:
+    if stat == "median":
+        summary = parsed.get("resource_summary", {}).get(key)
+        if summary is not None:
+            return float(summary["median"])
+
+    resources = parsed.get("resources", {})
+    if key in resources:
+        return float(resources[key])
+
+    summary = parsed.get("resource_summary", {}).get(key)
     if summary is not None:
         return float(summary["mean"])
     return None
@@ -835,8 +952,10 @@ def compare_runs(before: dict[str, Any], after: dict[str, Any], stat: str) -> st
                 compared_metrics.append(key)
             left_rss = left["parsed"].get("resources", {}).get("peak_rss_kb")
             right_rss = right["parsed"].get("resources", {}).get("peak_rss_kb")
-            if left_rss is not None and right_rss is not None:
-                rows.append(("peak_rss_mib", float(left_rss) / 1024.0, float(right_rss) / 1024.0))
+            left_rss_value = resource_value(left["parsed"], "peak_rss_kb", stat)
+            right_rss_value = resource_value(right["parsed"], "peak_rss_kb", stat)
+            if left_rss_value is not None and right_rss_value is not None:
+                rows.append(("peak_rss_mib", left_rss_value / 1024.0, right_rss_value / 1024.0))
             lines.append(render_metric_table(rows, stat_label))
             instability_notes = collect_instability_notes(name, left["parsed"], compared_metrics, "before")
             instability_notes.extend(
@@ -863,19 +982,23 @@ def compare_runs(before: dict[str, Any], after: dict[str, Any], stat: str) -> st
             ]
             rows = []
             for key, label in variant_order:
-                before_value = left["parsed"]["phases"].get(key)
-                after_value = right["parsed"]["phases"].get(key)
+                before_value = nested_metric_value(left["parsed"], "phases", "phase_summary", key, stat)
+                after_value = nested_metric_value(right["parsed"], "phases", "phase_summary", key, stat)
                 if before_value is None:
-                    before_value = left["parsed"]["variants"].get(key)
+                    before_value = nested_metric_value(
+                        left["parsed"], "variants", "variant_summary", key, stat
+                    )
                 if after_value is None:
-                    after_value = right["parsed"]["variants"].get(key)
+                    after_value = nested_metric_value(
+                        right["parsed"], "variants", "variant_summary", key, stat
+                    )
                 if before_value is None or after_value is None:
                     continue
                 rows.append((label, float(before_value), float(after_value)))
-            left_rss = left["parsed"].get("resources", {}).get("peak_rss_kb")
-            right_rss = right["parsed"].get("resources", {}).get("peak_rss_kb")
-            if left_rss is not None and right_rss is not None:
-                rows.append(("peak_rss_mib", float(left_rss) / 1024.0, float(right_rss) / 1024.0))
+            left_rss_value = resource_value(left["parsed"], "peak_rss_kb", stat)
+            right_rss_value = resource_value(right["parsed"], "peak_rss_kb", stat)
+            if left_rss_value is not None and right_rss_value is not None:
+                rows.append(("peak_rss_mib", left_rss_value / 1024.0, right_rss_value / 1024.0))
             lines.append(render_metric_table(rows, stat_label))
             before_best = left["parsed"]["variants"].get("best_thread_count")
             after_best = right["parsed"]["variants"].get("best_thread_count")
@@ -898,6 +1021,168 @@ def compare_runs(before: dict[str, Any], after: dict[str, Any], stat: str) -> st
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def aggregate_iterative_parsed(parsed_runs: list[dict[str, Any]]) -> dict[str, Any]:
+    config = parsed_runs[0].get("config")
+    iterations: list[dict[str, float]] = []
+    resource_samples: list[float] = []
+    for parsed in parsed_runs:
+        for iteration in parsed.get("iterations", []):
+            sample = dict(iteration)
+            sample.pop("iteration", None)
+            iterations.append(sample)
+        peak_rss = parsed.get("resources", {}).get("peak_rss_kb")
+        if peak_rss is not None:
+            resource_samples.append(float(peak_rss))
+
+    average, summary = summarize_sample_dicts(iterations)
+    resources: dict[str, float] = {}
+    resource_summary: dict[str, dict[str, float]] = {}
+    if resource_samples:
+        resources["peak_rss_kb"] = statistics.fmean(resource_samples)
+        resource_summary["peak_rss_kb"] = summarize_values(resource_samples)
+
+    return {
+        "config": config,
+        "iterations": [
+            {"iteration": float(index + 1), **sample} for index, sample in enumerate(iterations)
+        ],
+        "average": average,
+        "summary": summary,
+        "resources": resources,
+        "resource_summary": resource_summary,
+    }
+
+
+def aggregate_save_pipeline_parsed(parsed_runs: list[dict[str, Any]]) -> dict[str, Any]:
+    phase_average, phase_summary = summarize_sample_dicts(
+        [parsed.get("phases", {}) for parsed in parsed_runs]
+    )
+    variant_average, variant_summary = summarize_sample_dicts(
+        [parsed.get("variants", {}) for parsed in parsed_runs]
+    )
+    index_average, index_summary = summarize_sample_dicts(
+        [parsed.get("index_breakdown", {}) for parsed in parsed_runs]
+    )
+    resource_samples = [
+        float(parsed["resources"]["peak_rss_kb"])
+        for parsed in parsed_runs
+        if "peak_rss_kb" in parsed.get("resources", {})
+    ]
+    resources: dict[str, float] = {}
+    resource_summary: dict[str, dict[str, float]] = {}
+    if resource_samples:
+        resources["peak_rss_kb"] = statistics.fmean(resource_samples)
+        resource_summary["peak_rss_kb"] = summarize_values(resource_samples)
+
+    return {
+        "phases": phase_average,
+        "phase_summary": phase_summary,
+        "index_breakdown": index_average,
+        "index_breakdown_summary": index_summary,
+        "variants": variant_average,
+        "variant_summary": variant_summary,
+        "metadata": parsed_runs[0].get("metadata", {}),
+        "resources": resources,
+        "resource_summary": resource_summary,
+    }
+
+
+def aggregate_result_payloads(label: str, payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    if not payloads:
+        raise ValueError("cannot aggregate empty payload list")
+
+    aggregated_results: list[dict[str, Any]] = []
+    scenario_names = [result["name"] for result in payloads[0]["results"]]
+    for scenario_name in scenario_names:
+        scenario_runs = []
+        for payload in payloads:
+            scenario = next(result for result in payload["results"] if result["name"] == scenario_name)
+            scenario_runs.append(scenario)
+
+        first = scenario_runs[0]
+        parsed_runs = [scenario["parsed"] for scenario in scenario_runs]
+        if first["kind"] in {"bench_ops", "bench_catalog"}:
+            parsed = aggregate_iterative_parsed(parsed_runs)
+        else:
+            parsed = aggregate_save_pipeline_parsed(parsed_runs)
+
+        aggregated_results.append(
+            {
+                "name": first["name"],
+                "kind": first["kind"],
+                "description": first["description"],
+                "command": first["command"],
+                "fixture": first.get("fixture"),
+                "parsed": parsed,
+                "ab_run_count": len(scenario_runs),
+            }
+        )
+
+    return {
+        "label": label,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "git": payloads[0]["git"],
+        "benchmark_home": "",
+        "results": aggregated_results,
+    }
+
+
+def create_detached_worktree(path: Path, ref: str) -> None:
+    completed = subprocess.run(
+        ["git", "worktree", "add", "--detach", str(path), ref],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stdout.strip() or "git worktree add failed")
+
+
+def remove_worktree(path: Path) -> None:
+    completed = subprocess.run(
+        ["git", "worktree", "remove", "--force", str(path)],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stdout.strip() or "git worktree remove failed")
+
+
+def build_benchmark_artifacts(repo_root: Path) -> None:
+    env = os.environ.copy()
+    env["CARGO_TERM_COLOR"] = "never"
+    run_command(
+        [
+            "cargo",
+            "build",
+            "--release",
+            "-p",
+            "chkpt-core",
+            "--example",
+            "bench_ops",
+            "--example",
+            "bench_catalog",
+            "--bench",
+            "save_pipeline",
+        ],
+        env,
+        cwd=repo_root,
+    )
+
+
+def run_script_command(repo_root: Path, argv: list[str]) -> tuple[dict[str, Any], str]:
+    env = os.environ.copy()
+    env["CARGO_TERM_COLOR"] = "never"
+    output = run_command([sys.executable, "scripts/benchmarks.py", *argv], env, cwd=repo_root)
+    result_path = next((line.strip() for line in reversed(output.splitlines()) if line.strip()), None)
+    if result_path is None:
+        raise ValueError(f"failed to parse results path from output:\n{output}")
+    return load_result(result_path), output
 
 
 def generate_selected_fixtures(names: list[str]) -> dict[str, str]:
@@ -1025,6 +1310,100 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compare_commits(args: argparse.Namespace) -> int:
+    if args.rounds < 1:
+        raise ValueError("--rounds must be at least 1")
+
+    selected = scenario_names_from_args(args.scenarios, DEFAULT_SCENARIOS)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    base_dir = Path(tempfile.mkdtemp(prefix=f"chkpt-ab-{sanitize_label(args.label)}-", dir="/tmp"))
+    before_worktree = base_dir / "before"
+    after_worktree = base_dir / "after"
+
+    before_runs: list[dict[str, Any]] = []
+    after_runs: list[dict[str, Any]] = []
+    schedule: list[str] = []
+
+    try:
+        create_detached_worktree(before_worktree, args.before_ref)
+        create_detached_worktree(after_worktree, args.after_ref)
+
+        if not args.skip_build:
+            print(f"Building before ref {args.before_ref}...")
+            build_benchmark_artifacts(before_worktree)
+            print(f"Building after ref {args.after_ref}...")
+            build_benchmark_artifacts(after_worktree)
+
+        for round_index in range(args.rounds):
+            order = ["before", "after"] if round_index % 2 == 0 else ["after", "before"]
+            for side in order:
+                repo_root = before_worktree if side == "before" else after_worktree
+                run_label = f"{args.label}-{side}-r{round_index + 1}"
+                run_args = ["run", "--label", run_label, "--skip-build"]
+                for scenario in selected:
+                    run_args.extend(["--scenario", scenario])
+                print(f"Round {round_index + 1}/{args.rounds}: running {side}...")
+                payload, _output = run_script_command(repo_root, run_args)
+                schedule.append(f"round={round_index + 1}:{side}")
+                if side == "before":
+                    before_runs.append(payload)
+                else:
+                    after_runs.append(payload)
+
+        before_aggregate = aggregate_result_payloads(f"{args.label}-before", before_runs)
+        after_aggregate = aggregate_result_payloads(f"{args.label}-after", after_runs)
+        before_aggregate["ab_metadata"] = {
+            "ref": args.before_ref,
+            "rounds": args.rounds,
+            "schedule": schedule,
+        }
+        after_aggregate["ab_metadata"] = {
+            "ref": args.after_ref,
+            "rounds": args.rounds,
+            "schedule": schedule,
+        }
+
+        run_dir = RUNS_ROOT / f"{timestamp}-{sanitize_label(args.label)}-ab"
+        ensure_dir(run_dir)
+        before_path = run_dir / "before.results.json"
+        after_path = run_dir / "after.results.json"
+        report_path = run_dir / "comparison.md"
+        before_path.write_text(json.dumps(before_aggregate, indent=2, sort_keys=True), encoding="utf-8")
+        after_path.write_text(json.dumps(after_aggregate, indent=2, sort_keys=True), encoding="utf-8")
+
+        rendered = compare_runs(before_aggregate, after_aggregate, args.stat)
+        report_header = "\n".join(
+            [
+                f"# Alternating Benchmark Comparison: {args.label}",
+                "",
+                f"- Before ref: `{args.before_ref}`",
+                f"- After ref: `{args.after_ref}`",
+                f"- Rounds: `{args.rounds}`",
+                f"- Schedule: `{', '.join(schedule)}`",
+                "",
+            ]
+        )
+        rendered = report_header + rendered
+        report_path.write_text(rendered, encoding="utf-8")
+
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(rendered, encoding="utf-8")
+
+        sys.stdout.write(rendered)
+        sys.stdout.write(f"\nArtifacts: {run_dir}\n")
+        return 0
+    finally:
+        for worktree in (before_worktree, after_worktree):
+            if worktree.exists():
+                try:
+                    remove_worktree(worktree)
+                except subprocess.CalledProcessError:
+                    pass
+        shutil.rmtree(base_dir, ignore_errors=True)
+
+
 def main() -> int:
     args = parse_args()
     if args.command == "list":
@@ -1035,6 +1414,8 @@ def main() -> int:
         return cmd_run(args)
     if args.command == "compare":
         return cmd_compare(args)
+    if args.command == "compare-commits":
+        return cmd_compare_commits(args)
     raise AssertionError(f"unhandled command: {args.command}")
 
 
