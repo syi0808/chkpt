@@ -1153,6 +1153,46 @@ def remove_worktree(path: Path) -> None:
         raise RuntimeError(completed.stdout.strip() or "git worktree remove failed")
 
 
+def scenario_runtime_args(scenario: Scenario) -> list[str]:
+    if "--" not in scenario.command:
+        return []
+    separator = scenario.command.index("--")
+    return scenario.command[separator + 1 :]
+
+
+def fixed_bench_ops_source() -> str:
+    return (REPO_ROOT / "crates/chkpt-core/examples/bench_ops.rs").read_text(encoding="utf-8")
+
+
+def create_fixed_bench_ops_project(project_dir: Path, repo_root: Path) -> None:
+    ensure_dir(project_dir / "src")
+    cargo_toml = f"""[package]
+name = "fixed-bench-ops"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chkpt-core = {{ path = "{(repo_root / 'crates/chkpt-core').as_posix()}" }}
+tempfile = "3"
+libc = "0.2"
+"""
+    (project_dir / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
+    (project_dir / "src/main.rs").write_text(fixed_bench_ops_source(), encoding="utf-8")
+
+
+def fixed_bench_ops_binary_path(project_dir: Path) -> Path:
+    suffix = ".exe" if os.name == "nt" else ""
+    return project_dir / "target" / "release" / f"fixed-bench-ops{suffix}"
+
+
+def build_fixed_bench_ops_runner(project_dir: Path, repo_root: Path) -> Path:
+    create_fixed_bench_ops_project(project_dir, repo_root)
+    env = os.environ.copy()
+    env["CARGO_TERM_COLOR"] = "never"
+    run_command(["cargo", "build", "--release"], env, cwd=project_dir)
+    return fixed_bench_ops_binary_path(project_dir)
+
+
 def build_benchmark_artifacts(repo_root: Path, selected: list[str]) -> None:
     env = os.environ.copy()
     env["CARGO_TERM_COLOR"] = "never"
@@ -1165,6 +1205,7 @@ def execute_benchmark_run(
     skip_build: bool,
     repo_root: Path,
     persist_run_dir: bool = True,
+    fixed_bench_ops_binary: Path | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     needed_fixtures = sorted(
         {SCENARIOS[name].fixture for name in selected if SCENARIOS[name].fixture is not None}
@@ -1196,9 +1237,12 @@ def execute_benchmark_run(
     results: list[dict[str, Any]] = []
     for name in selected:
         scenario = SCENARIOS[name]
-        command = list(scenario.command)
-        if scenario.fixture:
-            command.append(fixture_paths[scenario.fixture])
+        if scenario.kind == "bench_ops" and fixed_bench_ops_binary is not None:
+            command = [str(fixed_bench_ops_binary), *scenario_runtime_args(scenario)]
+        else:
+            command = list(scenario.command)
+            if scenario.fixture:
+                command.append(fixture_paths[scenario.fixture])
         print(f"Running {name}...")
         output = run_command(command, env, cwd=repo_root)
         if raw_dir is not None:
@@ -1328,25 +1372,36 @@ def cmd_compare_commits(args: argparse.Namespace) -> int:
     base_dir = Path(tempfile.mkdtemp(prefix=f"chkpt-ab-{sanitize_label(args.label)}-", dir="/tmp"))
     before_worktree = base_dir / "before"
     after_worktree = base_dir / "after"
+    before_fixed_bench_ops: Path | None = None
+    after_fixed_bench_ops: Path | None = None
 
     before_runs: list[dict[str, Any]] = []
     after_runs: list[dict[str, Any]] = []
     schedule: list[str] = []
+    bench_ops_selected = [name for name in selected if SCENARIOS[name].kind == "bench_ops"]
+    build_selected = [name for name in selected if SCENARIOS[name].kind != "bench_ops"]
 
     try:
         create_detached_worktree(before_worktree, args.before_ref)
         create_detached_worktree(after_worktree, args.after_ref)
 
-        if not args.skip_build:
+        if not args.skip_build and build_selected:
             print(f"Building before ref {args.before_ref}...")
-            build_benchmark_artifacts(before_worktree, selected)
+            build_benchmark_artifacts(before_worktree, build_selected)
             print(f"Building after ref {args.after_ref}...")
-            build_benchmark_artifacts(after_worktree, selected)
+            build_benchmark_artifacts(after_worktree, build_selected)
+
+        if bench_ops_selected:
+            print(f"Building fixed bench_ops harness for {args.before_ref}...")
+            before_fixed_bench_ops = build_fixed_bench_ops_runner(base_dir / "before-bench-ops", before_worktree)
+            print(f"Building fixed bench_ops harness for {args.after_ref}...")
+            after_fixed_bench_ops = build_fixed_bench_ops_runner(base_dir / "after-bench-ops", after_worktree)
 
         for round_index in range(args.rounds):
             order = ["before", "after"] if round_index % 2 == 0 else ["after", "before"]
             for side in order:
                 repo_root = before_worktree if side == "before" else after_worktree
+                fixed_bench_ops_binary = before_fixed_bench_ops if side == "before" else after_fixed_bench_ops
                 run_label = f"{args.label}-{side}-r{round_index + 1}"
                 print(f"Round {round_index + 1}/{args.rounds}: running {side}...")
                 payload, _ = execute_benchmark_run(
@@ -1355,6 +1410,7 @@ def cmd_compare_commits(args: argparse.Namespace) -> int:
                     skip_build=True,
                     repo_root=repo_root,
                     persist_run_dir=False,
+                    fixed_bench_ops_binary=fixed_bench_ops_binary,
                 )
                 schedule.append(f"round={round_index + 1}:{side}")
                 if side == "before":
