@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
 const HASH_FILE_MMAP_THRESHOLD: u64 = 256 * 1024;
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// Compute BLAKE3 hash of content as raw bytes.
 pub fn hash_content_bytes(content: &[u8]) -> [u8; 32] {
@@ -96,6 +97,11 @@ pub struct BlobStore {
     base_dir: PathBuf,
 }
 
+fn push_hex_byte(dst: &mut String, byte: u8) {
+    dst.push(HEX_DIGITS[(byte >> 4) as usize] as char);
+    dst.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
+}
+
 impl BlobStore {
     pub fn new(base_dir: PathBuf) -> Self {
         Self { base_dir }
@@ -106,9 +112,25 @@ impl BlobStore {
         self.base_dir.join(prefix).join(rest)
     }
 
+    fn object_path_bytes(&self, hash: &[u8; 32]) -> PathBuf {
+        let mut prefix = String::with_capacity(2);
+        push_hex_byte(&mut prefix, hash[0]);
+
+        let mut rest = String::with_capacity(62);
+        for byte in &hash[1..] {
+            push_hex_byte(&mut rest, *byte);
+        }
+
+        self.base_dir.join(prefix).join(rest)
+    }
+
     /// Check if a blob exists in the store.
     pub fn exists(&self, hash_hex: &str) -> bool {
         self.object_path(hash_hex).exists()
+    }
+
+    pub fn exists_bytes(&self, hash: &[u8; 32]) -> bool {
+        self.object_path_bytes(hash).exists()
     }
 
     /// Write content to store. Returns the hash hex string.

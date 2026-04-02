@@ -320,8 +320,7 @@ fn resolve_restore_sources(
             continue;
         }
 
-        let hash_hex = bytes_to_hex(&target.hash);
-        if has_loose_objects && blob_store.exists(&hash_hex) {
+        if has_loose_objects && blob_store.exists_bytes(&target.hash) {
             sources.insert(target.hash, RestoreSource::Loose);
         } else {
             packed_hashes.push(target.hash);
