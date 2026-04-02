@@ -105,11 +105,10 @@ Invoke `/chkpt:chkpt` in Claude Code to:
 ```
 Workspace                      ~/.chkpt/stores/
 ┌──────────────┐              ┌──────────────────┐
-│  src/        │   save →     │  objects/         │
-│  tests/      │              │  trees/           │
-│  Cargo.toml  │   ← restore │  packs/           │
-└──────────────┘              │  catalog.sqlite   │
-                              │  index.bin        │
+│  src/        │   save →     │  trees/           │
+│  tests/      │              │  packs/           │
+│  Cargo.toml  │   ← restore │  catalog.sqlite   │
+└──────────────┘              │  index.bin        │
                               └──────────────────┘
 ```
 

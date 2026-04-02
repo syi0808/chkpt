@@ -1,4 +1,4 @@
-use chkpt_core::store::blob::{hash_content, BlobStore};
+use chkpt_core::store::blob::hash_content;
 use chkpt_core::store::pack::{PackReader, PackSet, PackWriter};
 use tempfile::TempDir;
 
@@ -59,35 +59,6 @@ fn test_pack_not_found_returns_none() {
     let reader = PackReader::open(&packs_dir, &pack_hash).unwrap();
     let result = reader.try_read(&"0".repeat(64));
     assert!(result.is_none());
-}
-
-#[test]
-fn test_pack_from_loose_objects() {
-    let dir = TempDir::new().unwrap();
-    let objects_dir = dir.path().join("objects");
-    let packs_dir = dir.path().join("packs");
-    std::fs::create_dir_all(&objects_dir).unwrap();
-    std::fs::create_dir_all(&packs_dir).unwrap();
-
-    let blob_store = BlobStore::new(objects_dir.clone());
-    let mut hashes = Vec::new();
-    for i in 0..10 {
-        let h = blob_store.write(format!("file-{}", i).as_bytes()).unwrap();
-        hashes.push(h);
-    }
-
-    // Pack all loose objects
-    let pack_hash = chkpt_core::store::pack::pack_loose_objects(&blob_store, &packs_dir).unwrap();
-
-    // Loose objects should be deleted
-    assert_eq!(blob_store.list_loose().unwrap().len(), 0);
-
-    // All data should be readable from pack
-    let reader = PackReader::open(&packs_dir, &pack_hash).unwrap();
-    for (i, hash) in hashes.iter().enumerate() {
-        let data = reader.read(hash).unwrap();
-        assert_eq!(data, format!("file-{}", i).as_bytes());
-    }
 }
 
 #[test]

@@ -4,7 +4,6 @@ use std::path::Path;
 #[napi(object)]
 pub struct JsStoreLayout {
     pub root: String,
-    pub objects_dir: String,
     pub trees_dir: String,
     pub snapshots_dir: String,
     pub packs_dir: String,
@@ -27,7 +26,6 @@ pub fn get_store_layout(workspace_path: String) -> JsStoreLayout {
     let layout = StoreLayout::new(&project_id);
     JsStoreLayout {
         root: layout.base_dir().to_string_lossy().to_string(),
-        objects_dir: layout.objects_dir().to_string_lossy().to_string(),
         trees_dir: layout.trees_dir().to_string_lossy().to_string(),
         snapshots_dir: layout.snapshots_dir().to_string_lossy().to_string(),
         packs_dir: layout.packs_dir().to_string_lossy().to_string(),

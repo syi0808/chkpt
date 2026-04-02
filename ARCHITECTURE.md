@@ -14,7 +14,6 @@ chkpt is a local filesystem checkpoint system. All interfaces call the same core
 The runtime storage model is:
 
 - `catalog.sqlite` for snapshot metadata, manifests, and blob locations
-- `objects/` for loose compressed blobs
 - `packs/` for packed blobs plus `.idx` indexes
 - `trees/` for tree nodes used to reconstruct directory structure
 - `index.bin` for current-workspace file metadata cache
@@ -46,7 +45,7 @@ crates/
 - `scanner/`
   - workspace walking and ignore matching
 - `store/blob.rs`
-  - BLAKE3 hashing, zstd compression, loose blob storage
+  - BLAKE3 hashing and path/content helpers
 - `store/tree.rs`
   - content-addressed tree nodes
 - `store/pack.rs`
@@ -92,21 +91,6 @@ Relevant tables:
   - blob location metadata: `blob_hash`, `pack_hash`, `size`
 
 `manifest_snapshot_id` lets metadata-only snapshots reuse another snapshot's manifest when nothing changed.
-
-### Blob Storage
-
-Loose blobs live under:
-
-```text
-objects/<2-hex-prefix>/<rest>
-```
-
-Each blob is:
-
-1. hashed with BLAKE3
-2. deduplicated by hash
-3. compressed with zstd
-4. written atomically
 
 ### Pack Storage
 
@@ -186,7 +170,7 @@ That shape is now backed by catalog rows, not snapshot JSON files.
 5. Scan the current workspace state.
 6. Compute add/change/remove/unchanged sets.
 7. If `dry_run`, return stats only.
-8. Otherwise restore content from loose objects or packs using `blob_index`.
+8. Otherwise restore content from packs using `blob_index`.
 9. Remove stale files and clean empty directories.
 10. Apply incremental index updates for changed paths only.
 
@@ -198,7 +182,7 @@ That shape is now backed by catalog rows, not snapshot JSON files.
 2. removes the snapshot row from the catalog
 3. re-computes reachable blobs from remaining manifests
 4. falls back to `root_tree_hash` traversal when needed
-5. deletes unreachable loose blobs
+5. deletes unreferenced blob rows
 6. removes pack files whose `pack_hash` is no longer referenced
 
 The current delete path does not delete snapshot JSON files because they are no longer part of the live storage model.
@@ -228,14 +212,12 @@ Built-in exclusions include:
 - `base_dir()`
 - `snapshots_dir()`
 - `catalog_path()`
-- `objects_dir()`
 - `trees_dir()`
 - `packs_dir()`
 - `index_path()`
 - `locks_dir()`
 - `attachments_deps_dir()`
 - `attachments_git_dir()`
-- `object_path()`
 - `tree_path()`
 
 `snapshots_dir()` and the attachment paths remain for compatibility with existing layout expectations, but the core save/restore/delete/list path does not rely on them.

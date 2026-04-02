@@ -4,7 +4,7 @@ use crate::index::{FileEntry, FileIndex};
 use crate::ops::io_order::sort_scanned_refs_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
-use crate::store::blob::{read_path_bytes, BlobStore};
+use crate::store::blob::read_path_bytes;
 use crate::store::catalog::{BlobLocation, CatalogSnapshot, ManifestEntry, MetadataCatalog};
 use crate::store::pack::{PackSet, PackWriter};
 use crate::store::snapshot::{Snapshot, SnapshotStats};
@@ -141,10 +141,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
     let cached_entries = index.entries();
 
     // 6. Create blob store
-    let objects_dir = layout.objects_dir();
-    let blob_store = BlobStore::new(objects_dir.clone());
     let packs_dir = layout.packs_dir();
-    let has_loose_objects = store_has_loose_objects(&objects_dir)?;
     let has_pack_objects = store_has_pack_objects(&packs_dir)?;
     let pack_set = has_pack_objects
         .then(|| PackSet::open_all(&packs_dir))
@@ -211,7 +208,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         |prepared| {
             let PreparedFile {
                 relative_path,
-                blob_hash_hex,
+                blob_hash_hex: _,
                 blob_hash_bytes,
                 compressed,
                 size,
@@ -224,19 +221,10 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
             total_bytes += size;
             if let Some(compressed) = compressed {
-                let exists_loose = has_loose_objects && blob_store.exists(&blob_hash_hex);
                 let exists_in_pack = pack_set
                     .as_ref()
                     .is_some_and(|ps| ps.contains_bytes(&blob_hash_bytes));
-                if exists_loose {
-                    blob_locations_to_record.push((
-                        blob_hash_bytes,
-                        BlobLocation {
-                            pack_hash: None,
-                            size,
-                        },
-                    ));
-                } else if !exists_in_pack {
+                if !exists_in_pack {
                     pack_writer.add_pre_compressed_bytes(blob_hash_bytes, compressed)?;
                     new_blob_records.push(NewBlobRecord {
                         blob_hash: blob_hash_bytes,
@@ -371,33 +359,8 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn store_has_external_objects(objects_dir: &Path, packs_dir: &Path) -> Result<bool> {
-    Ok(store_has_loose_objects(objects_dir)? || store_has_pack_objects(packs_dir)?)
-}
-
-fn store_has_loose_objects(objects_dir: &Path) -> Result<bool> {
-    let prefix_entries = match std::fs::read_dir(objects_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-
-    for prefix_entry in prefix_entries {
-        let prefix_entry = prefix_entry?;
-        if !prefix_entry.file_type()?.is_dir() {
-            continue;
-        }
-
-        for object_entry in std::fs::read_dir(prefix_entry.path())? {
-            let object_entry = object_entry?;
-            if object_entry.file_type()?.is_file()
-                && !object_entry.file_name().to_string_lossy().ends_with(".tmp")
-            {
-                return Ok(true);
-            }
-        }
-    }
-
-    Ok(false)
+    let _ = objects_dir;
+    Ok(store_has_pack_objects(packs_dir)?)
 }
 
 fn store_has_pack_objects(packs_dir: &Path) -> Result<bool> {

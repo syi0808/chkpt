@@ -1,9 +1,9 @@
 use chkpt_core::config::{project_id_from_path, StoreLayout};
 use chkpt_core::index::FileIndex;
 use chkpt_core::ops::save::{save, SaveOptions};
-use chkpt_core::store::blob::BlobStore;
+use chkpt_core::store::blob::hash_content_bytes;
 use chkpt_core::store::catalog::MetadataCatalog;
-use chkpt_core::store::pack::pack_loose_objects;
+use chkpt_core::store::pack::{list_packs, PackReader};
 use std::fs;
 use tempfile::TempDir;
 
@@ -93,16 +93,23 @@ fn test_save_dedups_against_packed_objects() {
     save(workspace.path(), SaveOptions::default()).unwrap();
 
     let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
-    let blob_store = BlobStore::new(layout.objects_dir());
-    if !blob_store.list_loose().unwrap().is_empty() {
-        pack_loose_objects(&blob_store, &layout.packs_dir()).unwrap();
-    }
+    let pack_hashes = list_packs(&layout.packs_dir()).unwrap();
+    assert_eq!(pack_hashes.len(), 1);
+    let reader = PackReader::open(&layout.packs_dir(), &pack_hashes[0]).unwrap();
+    let hash = chkpt_core::store::blob::hash_content(b"same");
+    assert_eq!(reader.read(&hash).unwrap(), b"same");
 
     fs::write(workspace.path().join("b.txt"), "same").unwrap();
     let result = save(workspace.path(), SaveOptions::default()).unwrap();
 
     assert_eq!(result.stats.new_objects, 0);
-    assert_eq!(blob_store.list_loose().unwrap().len(), 0);
+
+    let catalog = MetadataCatalog::open(layout.catalog_path()).unwrap();
+    let location = catalog
+        .blob_location(&hash_content_bytes(b"same"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(location.pack_hash.as_deref(), Some(pack_hashes[0].as_str()));
 }
 
 #[test]

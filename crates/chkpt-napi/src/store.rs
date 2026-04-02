@@ -1,5 +1,5 @@
 use crate::error::to_napi_error;
-use chkpt_core::store::blob::{hash_content, BlobStore};
+use chkpt_core::store::blob::hash_content;
 use chkpt_core::store::tree::{EntryType, TreeEntry, TreeStore};
 use napi::bindgen_prelude::*;
 use std::path::PathBuf;
@@ -36,27 +36,6 @@ pub(crate) fn bytes32_to_hex(bytes: &[u8; 32]) -> String {
 #[napi]
 pub fn blob_hash(content: Buffer) -> String {
     hash_content(content.as_ref())
-}
-
-#[napi]
-pub async fn blob_store(objects_dir: String, _hash: String, content: Buffer) -> napi::Result<()> {
-    let content = content.to_vec();
-    let store = BlobStore::new(PathBuf::from(objects_dir));
-    store.write(&content).map_err(to_napi_error)?;
-    Ok(())
-}
-
-#[napi]
-pub async fn blob_load(objects_dir: String, hash: String) -> napi::Result<Buffer> {
-    let store = BlobStore::new(PathBuf::from(objects_dir));
-    let data = store.read(&hash).map_err(to_napi_error)?;
-    Ok(Buffer::from(data))
-}
-
-#[napi]
-pub fn blob_exists(objects_dir: String, hash: String) -> bool {
-    let store = BlobStore::new(PathBuf::from(objects_dir));
-    store.exists(&hash)
 }
 
 // ── tree bindings ────────────────────────────────────────────────────

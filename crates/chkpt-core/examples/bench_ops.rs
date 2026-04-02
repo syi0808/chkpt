@@ -1,8 +1,6 @@
 use chkpt_core::config::{project_id_from_path, StoreLayout};
 use chkpt_core::ops::restore::{restore, RestoreOptions};
 use chkpt_core::ops::save::{save, SaveOptions};
-use chkpt_core::store::blob::BlobStore;
-use chkpt_core::store::pack::pack_loose_objects;
 use std::fs;
 use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
@@ -161,10 +159,6 @@ fn run_iteration(config: BenchConfig) -> Result<Metrics, Box<dyn std::error::Err
 
     let cold_save = timed(|| save(workspace.path(), save_options(config)))?;
     let baseline_snapshot_id = cold_save.1.snapshot_id;
-    let blob_store = BlobStore::new(store_layout.objects_dir());
-    if !blob_store.list_loose()?.is_empty() {
-        pack_loose_objects(&blob_store, &store_layout.packs_dir())?;
-    }
 
     let warm_save = timed(|| save(workspace.path(), save_options(config)))?;
 

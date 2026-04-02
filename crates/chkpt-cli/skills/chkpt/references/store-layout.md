@@ -10,7 +10,6 @@ chkpt stores data under:
 ├── index.bin               current-workspace metadata cache
 ├── locks/
 │   └── project.lock
-├── objects/                loose compressed blobs
 ├── trees/                  content-addressed tree nodes
 ├── packs/                  packed blobs and indexes
 ├── snapshots/              reserved compatibility directory
@@ -108,15 +107,8 @@ sqlite3 ~/.chkpt/stores/<project_id>/catalog.sqlite \
 
 ```bash
 du -sh ~/.chkpt/stores/<project_id>/
-du -sh ~/.chkpt/stores/<project_id>/objects/
 du -sh ~/.chkpt/stores/<project_id>/packs/
 du -sh ~/.chkpt/stores/<project_id>/trees/
-```
-
-### Count loose objects
-
-```bash
-find ~/.chkpt/stores/<project_id>/objects -type f | wc -l
 ```
 
 ## Tree Nodes

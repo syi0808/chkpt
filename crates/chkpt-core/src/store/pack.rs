@@ -1,5 +1,5 @@
 use crate::error::{ChkpttError, Result};
-use crate::store::blob::{hash_content, BlobStore};
+use crate::store::blob::hash_content;
 use memmap2::Mmap;
 use std::collections::HashMap;
 use std::io::{BufWriter, Cursor, Seek, SeekFrom, Write};
@@ -307,19 +307,6 @@ impl PackSet {
             })
     }
 
-    pub(crate) fn locate_bytes(&self, hash: &[u8; 32]) -> Option<PackLocation> {
-        self.readers
-            .iter()
-            .enumerate()
-            .find_map(|(reader_index, reader)| {
-                reader.find_bytes(hash).map(|entry| PackLocation {
-                    reader_index,
-                    offset: entry.offset,
-                    size: entry.size,
-                })
-            })
-    }
-
     pub(crate) fn locate_in_pack_bytes(
         &self,
         pack_hash: &str,
@@ -371,26 +358,6 @@ pub fn list_packs(packs_dir: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(packs)
-}
-
-/// Pack all loose objects from a BlobStore into a pack file, then delete loose objects.
-pub fn pack_loose_objects(blob_store: &BlobStore, packs_dir: &Path) -> Result<String> {
-    let loose = blob_store.list_loose()?;
-    if loose.is_empty() {
-        return Err(ChkpttError::Other("No loose objects to pack".into()));
-    }
-    let mut writer = PackWriter::new(packs_dir)?;
-    for hash in &loose {
-        let content = blob_store.read(hash)?;
-        // Re-compress from raw content
-        writer.add(&content)?;
-    }
-    let pack_hash = writer.finish()?;
-    // Delete loose objects
-    for hash in &loose {
-        blob_store.remove(hash)?;
-    }
-    Ok(pack_hash)
 }
 
 fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {

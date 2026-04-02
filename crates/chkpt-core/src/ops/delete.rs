@@ -1,7 +1,6 @@
 use crate::config::{project_id_from_path, StoreLayout};
-use crate::error::Result;
+use crate::error::{ChkpttError, Result};
 use crate::ops::lock::ProjectLock;
-use crate::store::blob::BlobStore;
 use crate::store::catalog::{CatalogSnapshot, MetadataCatalog};
 use crate::store::tree::{EntryType, TreeStore};
 use std::collections::HashSet;
@@ -75,12 +74,10 @@ pub fn delete(workspace_root: &Path, snapshot_id: &str) -> Result<()> {
     layout.ensure_dirs()?;
 
     let _lock = ProjectLock::acquire(&layout.locks_dir())?;
-
     let catalog = MetadataCatalog::open(layout.catalog_path())?;
     catalog.load_snapshot(snapshot_id)?;
     catalog.delete_snapshot(snapshot_id)?;
 
-    let blob_store = BlobStore::new(layout.objects_dir());
     let mut touched_packs = HashSet::new();
     let remaining_snapshots = catalog.list_snapshots(None)?;
     let tree_store = TreeStore::new(layout.trees_dir());
@@ -92,11 +89,13 @@ pub fn delete(workspace_root: &Path, snapshot_id: &str) -> Result<()> {
                 continue;
             }
             if let Some(location) = catalog.blob_location(&blob_hash)? {
-                if let Some(pack_hash) = location.pack_hash.clone() {
-                    touched_packs.insert(pack_hash);
-                } else {
-                    blob_store.remove(&bytes_to_hex(&blob_hash))?;
-                }
+                let pack_hash = location.pack_hash.clone().ok_or_else(|| {
+                    ChkpttError::StoreCorrupted(format!(
+                        "blob {} is not stored in a pack",
+                        bytes_to_hex(&blob_hash)
+                    ))
+                })?;
+                touched_packs.insert(pack_hash);
             }
             catalog.delete_blob_location(&blob_hash)?;
         }

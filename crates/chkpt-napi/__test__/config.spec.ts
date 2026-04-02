@@ -20,10 +20,9 @@ describe("config", () => {
     const dir = mkdtempSync(join(tmpdir(), "chkpt-test-"));
     const layout = getStoreLayout(dir);
     expect(layout.root).toContain(".chkpt/stores/");
-    expect(layout.objectsDir).toContain("objects");
     expect(layout.treesDir).toContain("trees");
     expect(layout.snapshotsDir).toContain("snapshots");
-    expect(layout.indexPath).toContain("index.sqlite");
+    expect(layout.indexPath).toContain("index.bin");
     expect(layout.locksDir).toContain("locks");
     expect(layout.attachmentsDepsDir).toContain("deps");
     expect(layout.attachmentsGitDir).toContain("git");
