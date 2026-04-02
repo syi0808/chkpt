@@ -376,9 +376,11 @@ pub fn pack_loose_objects(blob_store: &BlobStore, packs_dir: &Path) -> Result<St
 
 /// Read an object: first check loose, then packs.
 pub fn read_object(blob_store: &BlobStore, packs_dir: &Path, hash_hex: &str) -> Result<Vec<u8>> {
-    // 1. Check loose
-    if blob_store.exists(hash_hex) {
-        return blob_store.read(hash_hex);
+    // 1. Try loose first without a separate metadata probe.
+    match blob_store.read(hash_hex) {
+        Ok(content) => return Ok(content),
+        Err(ChkpttError::ObjectNotFound(_)) => {}
+        Err(error) => return Err(error),
     }
     read_object_from_pack_set(&PackSet::open_all(packs_dir)?, hash_hex)
 }

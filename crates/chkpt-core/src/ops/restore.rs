@@ -67,6 +67,18 @@ fn bytes_to_hex(bytes: &[u8; 32]) -> String {
     blake3::Hash::from(*bytes).to_hex().to_string()
 }
 
+fn join_relative_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        return name.to_owned();
+    }
+
+    let mut path = String::with_capacity(prefix.len() + 1 + name.len());
+    path.push_str(prefix);
+    path.push('/');
+    path.push_str(name);
+    path
+}
+
 /// Recursively walk a tree and collect all file entries as (relative_path, blob_hash_hex).
 fn collect_tree_files(
     tree_store: &TreeStore,
@@ -76,11 +88,7 @@ fn collect_tree_files(
 ) -> Result<()> {
     let entries = tree_store.read(tree_hash_hex)?;
     for entry in &entries {
-        let path = if prefix.is_empty() {
-            entry.name.clone()
-        } else {
-            format!("{}/{}", prefix, entry.name)
-        };
+        let path = join_relative_path(prefix, &entry.name);
         match entry.entry_type {
             EntryType::File => {
                 result.insert(

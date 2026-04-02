@@ -728,7 +728,9 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
     let mut known_hashes: HashSet<String> = HashSet::with_capacity(dir_list.len());
 
     for dir in &dir_list {
-        let mut entries: Vec<TreeEntry> = Vec::new();
+        let file_count = dir_files.get(dir).map(|files| files.len()).unwrap_or(0);
+        let child_count = child_dirs.get(dir).map(|children| children.len()).unwrap_or(0);
+        let mut entries: Vec<TreeEntry> = Vec::with_capacity(file_count + child_count);
 
         if let Some(files) = dir_files.get(dir) {
             for pf in files {
@@ -796,19 +798,21 @@ fn register_directory_hierarchy(
     }
 
     let mut parent = String::new();
+    let mut current = String::with_capacity(dir.len());
     for segment in dir.split('/') {
-        let current = if parent.is_empty() {
-            segment.to_string()
-        } else {
-            format!("{}/{}", parent, segment)
-        };
+        if !current.is_empty() {
+            current.push('/');
+        }
+        current.push_str(segment);
+
         if all_dirs.insert(current.clone()) {
             child_dirs
                 .entry(parent.clone())
                 .or_default()
                 .push(current.clone());
         }
-        parent = current;
+        parent.clear();
+        parent.push_str(&current);
     }
 }
 
