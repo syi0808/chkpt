@@ -1,6 +1,6 @@
 {
   "name": "@chkpt/mcp",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "MCP server for chkpt – run via npx @chkpt/mcp",
   "bin": {
     "chkpt-mcp": "./cli.mjs"

@@ -1,6 +1,6 @@
 {
   "name": "chkpt",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Filesystem checkpoint engine - save, restore, and manage workspace snapshots",
   "main": "index.js",
   "types": "index.d.ts",

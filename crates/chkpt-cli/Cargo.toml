@@ -1,6 +1,6 @@
 [package]
 name = "chkpt-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "CLI for chkpt – a fast, content-addressable checkpoint system"
 license = "Apache-2.0"
@@ -10,7 +10,7 @@ name = "chkpt"
 path = "src/main.rs"
 
 [dependencies]
-chkpt-core = { version = "0.1.0", path = "../chkpt-core" }
+chkpt-core = { version = "0.2.0", path = "../chkpt-core" }
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

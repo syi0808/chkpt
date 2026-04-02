@@ -1,12 +1,12 @@
 [package]
 name = "chkpt-mcp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "MCP server for chkpt – a fast, content-addressable checkpoint system"
 license = "Apache-2.0"
 
 [dependencies]
-chkpt-core = { version = "0.1.0", path = "../chkpt-core" }
+chkpt-core = { version = "0.2.0", path = "../chkpt-core" }
 rmcp = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
