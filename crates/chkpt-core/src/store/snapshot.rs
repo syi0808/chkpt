@@ -95,17 +95,22 @@ impl SnapshotStore {
 
     pub fn load(&self, id: &str) -> Result<Snapshot> {
         let path = self.snapshot_path(id);
-        if !path.exists() {
-            return Err(ChkpttError::SnapshotNotFound(id.to_string()));
-        }
-        let json = std::fs::read_to_string(&path)?;
+        let json = match std::fs::read_to_string(&path) {
+            Ok(json) => json,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ChkpttError::SnapshotNotFound(id.to_string()));
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(serde_json::from_str(&json)?)
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
         let path = self.snapshot_path(id);
-        if path.exists() {
-            std::fs::remove_file(&path)?;
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error.into());
+            }
         }
         let latest_path = self.latest_path();
         if latest_path.exists() {

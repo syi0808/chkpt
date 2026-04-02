@@ -152,10 +152,13 @@ impl BlobStore {
     /// Read and decompress a blob by hash.
     pub fn read(&self, hash_hex: &str) -> Result<Vec<u8>> {
         let path = self.object_path(hash_hex);
-        if !path.exists() {
-            return Err(ChkpttError::ObjectNotFound(hash_hex.to_string()));
-        }
-        let compressed = std::fs::read(&path)?;
+        let compressed = match std::fs::read(&path) {
+            Ok(compressed) => compressed,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ChkpttError::ObjectNotFound(hash_hex.to_string()));
+            }
+            Err(error) => return Err(error.into()),
+        };
         let decompressed = zstd::decode_all(&compressed[..])?;
         Ok(decompressed)
     }
@@ -171,13 +174,18 @@ impl BlobStore {
             if !prefix_entry.file_type()?.is_dir() {
                 continue;
             }
-            let prefix = prefix_entry.file_name().to_string_lossy().to_string();
+            let prefix = prefix_entry.file_name();
+            let prefix = prefix.to_string_lossy();
             for obj_entry in std::fs::read_dir(prefix_entry.path())? {
                 let obj_entry = obj_entry?;
                 if obj_entry.file_type()?.is_file() {
-                    let rest = obj_entry.file_name().to_string_lossy().to_string();
+                    let rest = obj_entry.file_name();
+                    let rest = rest.to_string_lossy();
                     if !rest.ends_with(".tmp") {
-                        hashes.push(format!("{}{}", prefix, rest));
+                        let mut hash = String::with_capacity(prefix.len() + rest.len());
+                        hash.push_str(&prefix);
+                        hash.push_str(&rest);
+                        hashes.push(hash);
                     }
                 }
             }
@@ -188,8 +196,10 @@ impl BlobStore {
     /// Remove a loose object by hash.
     pub fn remove(&self, hash_hex: &str) -> Result<()> {
         let path = self.object_path(hash_hex);
-        if path.exists() {
-            std::fs::remove_file(&path)?;
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error.into());
+            }
         }
         Ok(())
     }

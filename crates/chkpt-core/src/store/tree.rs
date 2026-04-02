@@ -206,10 +206,13 @@ impl TreeStore {
 
         // Fall back to loose file
         let path = self.tree_path(hash_hex);
-        if !path.exists() {
-            return Err(ChkpttError::ObjectNotFound(hash_hex.to_string()));
-        }
-        let data = std::fs::read(&path)?;
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ChkpttError::ObjectNotFound(hash_hex.to_string()));
+            }
+            Err(error) => return Err(error.into()),
+        };
         let entries: Vec<TreeEntry> = bitcode::decode(&data)?;
         Ok(entries)
     }
@@ -256,8 +259,10 @@ impl TreeStore {
 
     pub fn remove(&self, hash_hex: &str) -> Result<()> {
         let path = self.tree_path(hash_hex);
-        if path.exists() {
-            std::fs::remove_file(&path)?;
+        if let Err(error) = std::fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error.into());
+            }
         }
         Ok(())
     }
@@ -273,13 +278,18 @@ impl TreeStore {
             if !prefix_entry.file_type()?.is_dir() {
                 continue;
             }
-            let prefix = prefix_entry.file_name().to_string_lossy().to_string();
+            let prefix = prefix_entry.file_name();
+            let prefix = prefix.to_string_lossy();
             for entry in std::fs::read_dir(prefix_entry.path())? {
                 let entry = entry?;
                 if entry.file_type()?.is_file() {
-                    let rest = entry.file_name().to_string_lossy().to_string();
+                    let rest = entry.file_name();
+                    let rest = rest.to_string_lossy();
                     if !rest.ends_with(".tmp") {
-                        hashes.push(format!("{}{}", prefix, rest));
+                        let mut hash = String::with_capacity(prefix.len() + rest.len());
+                        hash.push_str(&prefix);
+                        hash.push_str(&rest);
+                        hashes.push(hash);
                     }
                 }
             }
