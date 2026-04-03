@@ -165,6 +165,14 @@ impl PackReader {
         let dat = unsafe { Mmap::map(&dat_file)? };
         let idx = unsafe { Mmap::map(&idx_file)? };
 
+        // Hint kernel about expected access patterns.
+        // .dat is read sequentially during restore; .idx is binary-searched.
+        #[cfg(unix)]
+        {
+            let _ = dat.advise(memmap2::Advice::Sequential);
+            let _ = idx.advise(memmap2::Advice::Random);
+        }
+
         let entry_count = idx.len() / IDX_ENTRY_SIZE;
 
         Ok(Self {

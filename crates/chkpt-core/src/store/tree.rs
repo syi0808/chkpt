@@ -57,6 +57,11 @@ impl TreeStore {
                 Mmap::map(&idx_file)
             }) {
                 (Ok(dat), Ok(idx)) => {
+                    #[cfg(unix)]
+                    {
+                        let _ = dat.advise(memmap2::Advice::Sequential);
+                        let _ = idx.advise(memmap2::Advice::Random);
+                    }
                     let count = idx.len() / TREE_IDX_ENTRY_SIZE;
                     (Some(dat), Some(idx), count)
                 }

@@ -28,6 +28,10 @@ pub fn read_or_mmap(path: &Path) -> Result<FileContent> {
     if metadata.len() >= HASH_FILE_MMAP_THRESHOLD {
         // SAFETY: the file is opened read-only and we do not mutate it through the mapping.
         let mmap = unsafe { Mmap::map(&file) }?;
+        #[cfg(unix)]
+        {
+            let _ = mmap.advise(memmap2::Advice::Sequential);
+        }
         return Ok(FileContent::Mmap(mmap));
     }
     let mut buf = Vec::with_capacity(metadata.len() as usize);
