@@ -34,3 +34,7 @@ lz4_flex = { workspace = true }
 [[bench]]
 name = "save_pipeline"
 harness = false
+
+[[bench]]
+name = "hash_compress_compare"
+harness = false
