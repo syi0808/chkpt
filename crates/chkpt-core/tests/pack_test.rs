@@ -1,4 +1,5 @@
 use chkpt_core::store::blob::hash_content;
+use chkpt_core::store::blob::hash_content_bytes;
 use chkpt_core::store::pack::{PackReader, PackSet, PackWriter};
 use tempfile::TempDir;
 
@@ -57,7 +58,7 @@ fn test_pack_not_found_returns_none() {
     let pack_hash = writer.finish().unwrap();
 
     let reader = PackReader::open(&packs_dir, &pack_hash).unwrap();
-    let result = reader.try_read(&"0".repeat(64));
+    let result = reader.try_read(&"0".repeat(32));
     assert!(result.is_none());
 }
 
@@ -109,7 +110,12 @@ fn test_pack_write_with_precompressed_entries() {
 
     let content = b"streamed-content".to_vec();
     let hash = hash_content(&content);
-    let compressed = zstd::encode_all(&content[..], 3).unwrap();
+    let compressed = {
+        use lz4_flex::frame::FrameEncoder;
+        let mut enc = FrameEncoder::new(Vec::new());
+        std::io::Write::write_all(&mut enc, &content).unwrap();
+        enc.finish().unwrap()
+    };
 
     let mut writer = PackWriter::new(&packs_dir).unwrap();
     writer.add_pre_compressed(hash.clone(), compressed).unwrap();
@@ -169,6 +175,27 @@ fn test_pack_mmap_reader_large_dataset() {
     }
 
     // Verify non-existent hash returns None
-    let fake_hash = "0".repeat(64);
+    let fake_hash = "0".repeat(32);
     assert!(reader.try_read(&fake_hash).is_none());
+}
+
+#[test]
+fn test_pack_locate_bytes() {
+    let dir = TempDir::new().unwrap();
+    let packs_dir = dir.path().join("packs");
+    std::fs::create_dir_all(&packs_dir).unwrap();
+
+    let content = b"locate-bytes-test-data";
+    let hash_bytes = hash_content_bytes(content);
+
+    let mut writer = PackWriter::new(&packs_dir).unwrap();
+    writer.add(content).unwrap();
+    writer.finish().unwrap();
+
+    let pack_set = PackSet::open_all(&packs_dir).unwrap();
+    let location = pack_set.locate_bytes(&hash_bytes);
+    assert!(location.is_some());
+
+    let missing = [0u8; 16];
+    assert!(pack_set.locate_bytes(&missing).is_none());
 }

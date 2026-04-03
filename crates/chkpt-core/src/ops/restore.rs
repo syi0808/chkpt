@@ -4,7 +4,7 @@ use crate::index::FileIndex;
 use crate::ops::io_order::sort_scanned_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
-use crate::store::blob::hash_path_bytes;
+use crate::store::blob::{bytes_to_hex, hash_path_bytes};
 use crate::store::catalog::{ManifestEntry, MetadataCatalog};
 use crate::store::pack::{PackLocation, PackSet};
 use crate::store::tree::{EntryType, TreeStore};
@@ -31,12 +31,12 @@ pub struct RestoreResult {
 }
 
 struct CurrentFileState {
-    hash: [u8; 32],
+    hash: [u8; 16],
     is_symlink: bool,
 }
 
 struct TargetFileState {
-    hash: [u8; 32],
+    hash: [u8; 16],
     is_symlink: bool,
 }
 
@@ -57,11 +57,6 @@ struct RestoreTask {
     path: String,
     is_symlink: bool,
     source: RestoreSource,
-}
-
-/// Convert a [u8; 32] to a 64-char hex string.
-fn bytes_to_hex(bytes: &[u8; 32]) -> String {
-    blake3::Hash::from(*bytes).to_hex().to_string()
 }
 
 fn join_relative_path(prefix: &str, name: &str) -> String {
@@ -168,6 +163,25 @@ fn scan_current_state(
     Ok(state)
 }
 
+/// Pre-create all unique parent directories needed for restore tasks.
+fn precreate_restore_directories(
+    workspace_root: &Path,
+    restore_tasks: &[RestoreTask],
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::with_capacity(restore_tasks.len() / 4);
+    for task in restore_tasks {
+        if let Some(parent) = std::path::Path::new(&task.path).parent() {
+            if parent.as_os_str().is_empty() {
+                continue;
+            }
+            if seen.insert(parent.to_path_buf()) {
+                std::fs::create_dir_all(workspace_root.join(parent))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn restore_files(
     workspace_root: &Path,
     restore_tasks: &[RestoreTask],
@@ -179,6 +193,8 @@ fn restore_files(
     if restore_tasks.is_empty() {
         return Ok(Vec::new());
     }
+
+    precreate_restore_directories(workspace_root, restore_tasks)?;
 
     let worker_count = std::thread::available_parallelism()
         .map(|count| count.get())
@@ -238,9 +254,6 @@ fn restore_files(
 
 fn restore_file(workspace_root: &Path, task: &RestoreTask, pack_set: &PackSet) -> Result<()> {
     let file_path = workspace_root.join(&task.path);
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
 
     if let Ok(metadata) = std::fs::symlink_metadata(&file_path) {
         if metadata.file_type().is_symlink() || task.is_symlink {
@@ -287,9 +300,8 @@ fn resolve_restore_sources(
     target_state: &BTreeMap<String, TargetFileState>,
     catalog: &MetadataCatalog,
     packs_dir: &Path,
-) -> Result<(PackSet, HashMap<[u8; 32], RestoreSource>)> {
+) -> Result<(PackSet, HashMap<[u8; 16], RestoreSource>)> {
     let candidate_count = files_to_add.len() + files_to_change.len();
-    let mut sources = HashMap::with_capacity(candidate_count);
     let mut seen_hashes = HashSet::with_capacity(candidate_count);
     let mut packed_hashes = Vec::with_capacity(candidate_count);
 
@@ -304,11 +316,14 @@ fn resolve_restore_sources(
     }
 
     if packed_hashes.is_empty() {
-        return Ok((PackSet::empty(), sources));
+        return Ok((PackSet::empty(), HashMap::new()));
     }
 
     let blob_locations = catalog.blob_locations_for_hashes(&packed_hashes)?;
+
+    // Single pass: collect pack hashes and build per-blob location info
     let mut selected_pack_hashes = HashSet::with_capacity(packed_hashes.len());
+    let mut hash_to_pack: Vec<([u8; 16], String)> = Vec::with_capacity(packed_hashes.len());
     for hash in &packed_hashes {
         let location = blob_locations
             .get(hash)
@@ -320,19 +335,17 @@ fn resolve_restore_sources(
             ))
         })?;
         selected_pack_hashes.insert(pack_hash.clone());
+        hash_to_pack.push((*hash, pack_hash.clone()));
     }
 
-    let mut pack_hashes: Vec<_> = selected_pack_hashes.into_iter().collect();
-    pack_hashes.sort_unstable();
-    let pack_set = PackSet::open_selected(packs_dir, &pack_hashes)?;
+    let mut pack_hashes_vec: Vec<_> = selected_pack_hashes.into_iter().collect();
+    pack_hashes_vec.sort_unstable();
+    let pack_set = PackSet::open_selected(packs_dir, &pack_hashes_vec)?;
 
-    for hash in packed_hashes {
-        let pack_hash = blob_locations
-            .get(&hash)
-            .and_then(|location| location.pack_hash.as_ref())
-            .expect("pack hash missing after validation");
+    let mut sources = HashMap::with_capacity(hash_to_pack.len());
+    for (hash, pack_hash) in hash_to_pack {
         let location = pack_set
-            .locate_in_pack_bytes(pack_hash, &hash)
+            .locate_in_pack_bytes(&pack_hash, &hash)
             .ok_or_else(|| ChkpttError::ObjectNotFound(bytes_to_hex(&hash)))?;
         sources.insert(hash, RestoreSource::Packed(location));
     }
@@ -344,7 +357,7 @@ fn build_restore_tasks(
     files_to_add: &[String],
     files_to_change: &[String],
     target_state: &BTreeMap<String, TargetFileState>,
-    restore_sources: &HashMap<[u8; 32], RestoreSource>,
+    restore_sources: &HashMap<[u8; 16], RestoreSource>,
 ) -> Result<Vec<RestoreTask>> {
     let mut tasks = Vec::with_capacity(files_to_add.len() + files_to_change.len());
 
@@ -551,22 +564,67 @@ pub fn restore(
         restore_total,
     )?;
 
-    // 8b. Remove files that are not in the target snapshot
-    for path in &files_to_remove {
-        let file_path = workspace_root.join(path);
-        match std::fs::remove_file(&file_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+    // 8b. Remove files that are not in the target snapshot (parallel)
+    {
+        let remove_worker_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(files_to_remove.len().max(1));
+        if remove_worker_count <= 1 {
+            for path in &files_to_remove {
+                let file_path = workspace_root.join(path);
+                match std::fs::remove_file(&file_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+                let completed = restore_progress.fetch_add(1, Ordering::Relaxed) + 1;
+                emit(
+                    &options.progress,
+                    ProgressEvent::RestoreFile {
+                        completed,
+                        total: restore_total,
+                    },
+                );
+            }
+        } else {
+            let chunk_size = files_to_remove.len().div_ceil(remove_worker_count);
+            let progress_ref = &restore_progress;
+            let progress_cb_ref = &options.progress;
+            std::thread::scope(|scope| -> Result<()> {
+                let workers: Vec<_> = files_to_remove
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || -> Result<()> {
+                            for path in chunk {
+                                let file_path = workspace_root.join(path);
+                                match std::fs::remove_file(&file_path) {
+                                    Ok(()) => {}
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(error) => return Err(error.into()),
+                                }
+                                let completed = progress_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                                emit(
+                                    progress_cb_ref,
+                                    ProgressEvent::RestoreFile {
+                                        completed,
+                                        total: restore_total,
+                                    },
+                                );
+                            }
+                            Ok(())
+                        })
+                    })
+                    .collect();
+
+                for worker in workers {
+                    worker.join().map_err(|_| {
+                        ChkpttError::Other("file removal worker thread panicked".into())
+                    })??;
+                }
+                Ok(())
+            })?;
         }
-        let completed = restore_progress.fetch_add(1, Ordering::Relaxed) + 1;
-        emit(
-            &options.progress,
-            ProgressEvent::RestoreFile {
-                completed,
-                total: restore_total,
-            },
-        );
     }
 
     // 8c. Clean up empty directories affected by removed files only.
@@ -628,7 +686,7 @@ fn restored_index_entries(
 fn cached_hash_bytes(
     file: &ScannedFile,
     cached_entries: &HashMap<String, crate::index::FileEntry>,
-) -> Option<[u8; 32]> {
+) -> Option<[u8; 16]> {
     let cached = cached_entries.get(&file.relative_path)?;
     if cached.mtime_secs == file.mtime_secs
         && cached.mtime_nanos == file.mtime_nanos
@@ -642,7 +700,7 @@ fn cached_hash_bytes(
     }
 }
 
-fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFile, [u8; 32])>> {
+fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFile, [u8; 16])>> {
     if scanned_files.is_empty() {
         return Ok(Vec::new());
     }
@@ -670,7 +728,7 @@ fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFil
         let mut workers = Vec::with_capacity(scanned_files.len().div_ceil(chunk_size));
         for chunk in scanned_files.chunks(chunk_size) {
             workers.push(
-                scope.spawn(move || -> Result<Vec<(ScannedFile, [u8; 32])>> {
+                scope.spawn(move || -> Result<Vec<(ScannedFile, [u8; 16])>> {
                     chunk
                         .iter()
                         .map(|file| {
@@ -750,32 +808,23 @@ fn cleanup_removed_file_parents(root: &Path, removed_paths: &[String]) -> Result
         return Ok(());
     }
 
-    let mut candidates = HashSet::with_capacity(removed_paths.len());
+    // Collect unique parent directory relative paths with pre-computed depth
+    let mut dir_depths: HashMap<String, usize> = HashMap::new();
     for removed_path in removed_paths {
-        let mut current = root.join(removed_path);
-        while let Some(parent) = current.parent() {
-            if parent == root {
-                candidates.insert(parent.to_path_buf());
-                break;
-            }
-            if !parent.starts_with(root) {
-                break;
-            }
-            candidates.insert(parent.to_path_buf());
-            current = parent.to_path_buf();
+        let mut path_str = removed_path.as_str();
+        while let Some(pos) = path_str.rfind('/') {
+            path_str = &path_str[..pos];
+            let depth = path_str.matches('/').count() + 1;
+            dir_depths.entry(path_str.to_string()).or_insert(depth);
         }
     }
 
-    let mut candidates: Vec<_> = candidates.into_iter().filter(|dir| dir != root).collect();
-    candidates.sort_unstable_by(|left, right| {
-        right
-            .components()
-            .count()
-            .cmp(&left.components().count())
-            .then_with(|| left.cmp(right))
-    });
+    // Sort deepest-first so we remove leaf directories before parents
+    let mut candidates: Vec<(String, usize)> = dir_depths.into_iter().collect();
+    candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    for dir in candidates {
+    for (relative_dir, _depth) in candidates {
+        let dir = root.join(&relative_dir);
         match std::fs::remove_dir(&dir) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -918,7 +967,7 @@ mod tests {
         assert_eq!(diff.files_to_change, vec!["link".to_string()]);
     }
 
-    fn hash_bytes(label: &str) -> [u8; 32] {
-        *blake3::hash(label.as_bytes()).as_bytes()
+    fn hash_bytes(label: &str) -> [u8; 16] {
+        xxhash_rust::xxh3::xxh3_128(label.as_bytes()).to_le_bytes()
     }
 }

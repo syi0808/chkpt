@@ -16,7 +16,7 @@ fn sample_snapshot(
         message: message.map(|value| value.to_string()),
         parent_snapshot_id: parent_snapshot_id.map(|value| value.to_string()),
         manifest_snapshot_id: None,
-        root_tree_hash: Some([second as u8; 32]),
+        root_tree_hash: Some([second as u8; 16]),
         stats: SnapshotStats {
             total_files: 2,
             total_bytes: 15,
@@ -29,13 +29,13 @@ fn sample_manifest() -> Vec<ManifestEntry> {
     vec![
         ManifestEntry {
             path: "a.txt".into(),
-            blob_hash: [1u8; 32],
+            blob_hash: [1u8; 16],
             size: 5,
             mode: 0o100644,
         },
         ManifestEntry {
             path: "nested/b.txt".into(),
-            blob_hash: [2u8; 32],
+            blob_hash: [2u8; 16],
             size: 10,
             mode: 0o100644,
         },
@@ -106,7 +106,7 @@ fn test_catalog_tracks_blob_locations_and_cascades_manifest_rows() {
     catalog.insert_snapshot(&snapshot, &manifest).unwrap();
     catalog
         .bulk_upsert_blob_locations(&[(
-            [9u8; 32],
+            [9u8; 16],
             BlobLocation {
                 pack_hash: Some("pack-1".into()),
                 size: 42,
@@ -114,7 +114,7 @@ fn test_catalog_tracks_blob_locations_and_cascades_manifest_rows() {
         )])
         .unwrap();
 
-    let location = catalog.blob_location(&[9u8; 32]).unwrap().unwrap();
+    let location = catalog.blob_location(&[9u8; 16]).unwrap().unwrap();
     assert_eq!(location.pack_hash.as_deref(), Some("pack-1"));
     assert_eq!(location.size, 42);
 
@@ -168,14 +168,14 @@ fn test_catalog_bulk_upserts_and_lists_blob_hashes() {
     catalog
         .bulk_upsert_blob_locations(&[
             (
-                [3u8; 32],
+                [3u8; 16],
                 BlobLocation {
                     pack_hash: Some("pack-a".into()),
                     size: 10,
                 },
             ),
             (
-                [4u8; 32],
+                [4u8; 16],
                 BlobLocation {
                     pack_hash: None,
                     size: 20,
@@ -185,6 +185,6 @@ fn test_catalog_bulk_upserts_and_lists_blob_hashes() {
         .unwrap();
 
     let known = catalog.all_blob_hashes().unwrap();
-    assert!(known.contains(&[3u8; 32]));
-    assert!(known.contains(&[4u8; 32]));
+    assert!(known.contains(&[3u8; 16]));
+    assert!(known.contains(&[4u8; 16]));
 }

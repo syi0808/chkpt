@@ -3,8 +3,6 @@ resolver = "2"
 members = ["crates/chkpt-core", "crates/chkpt-cli", "crates/chkpt-mcp", "crates/chkpt-napi"]
 
 [workspace.dependencies]
-blake3 = "1"
-zstd = "0.13"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -25,4 +23,6 @@ dialoguer = "0.11"
 rmcp = { version = "0.17", features = ["server", "macros", "transport-io"] }
 bitcode = { version = "0.6", features = ["serde"] }
 memmap2 = "0.9"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+lz4_flex = "0.11"
 rustix = { version = "0.38", features = ["fs"] }

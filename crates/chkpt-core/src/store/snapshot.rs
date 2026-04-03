@@ -13,7 +13,7 @@ pub struct Snapshot {
     pub id: String,
     pub created_at: DateTime<Utc>,
     pub message: Option<String>,
-    pub root_tree_hash: [u8; 32],
+    pub root_tree_hash: [u8; 16],
     pub parent_snapshot_id: Option<String>,
     pub stats: SnapshotStats,
 }
@@ -21,7 +21,7 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn new(
         message: Option<String>,
-        root_tree_hash: [u8; 32],
+        root_tree_hash: [u8; 16],
         parent_snapshot_id: Option<String>,
         stats: SnapshotStats,
     ) -> Self {

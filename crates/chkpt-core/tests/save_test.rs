@@ -8,6 +8,54 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+fn test_save_pre_compressed_file_stored_without_recompression() {
+    let workspace = TempDir::new().unwrap();
+    let content = b"fake-jpeg-content-that-is-already-compressed";
+    fs::write(workspace.path().join("photo.jpg"), content).unwrap();
+    fs::write(workspace.path().join("code.rs"), "fn main() {}").unwrap();
+
+    let result = save(workspace.path(), SaveOptions::default()).unwrap();
+    assert_eq!(result.stats.new_objects, 2);
+    assert_eq!(result.stats.total_files, 2);
+
+    // Verify the .jpg blob is stored in the pack and decompresses to the original
+    // content. This exercises the storage layer directly (not just the restore path)
+    // so a recompress/decompress bug would surface as a decompression failure or
+    // corrupted bytes rather than a silent pass.
+    let layout =
+        chkpt_core::config::StoreLayout::new(&chkpt_core::config::project_id_from_path(
+            workspace.path(),
+        ));
+    let pack_hashes = list_packs(&layout.packs_dir()).unwrap();
+    assert_eq!(pack_hashes.len(), 1, "expected exactly one pack after save");
+    let reader = PackReader::open(&layout.packs_dir(), &pack_hashes[0]).unwrap();
+    let hash = chkpt_core::store::blob::hash_content(content);
+    // read() decompresses the LZ4 frame stored in the pack — if the blob were
+    // double-compressed this would either fail or return garbled bytes.
+    let stored = reader.read(&hash).unwrap();
+    assert_eq!(stored, content, "stored blob must decompress to original content");
+
+    fs::remove_file(workspace.path().join("photo.jpg")).unwrap();
+    fs::remove_file(workspace.path().join("code.rs")).unwrap();
+
+    chkpt_core::ops::restore::restore(
+        workspace.path(),
+        &result.snapshot_id,
+        chkpt_core::ops::restore::RestoreOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read(workspace.path().join("photo.jpg")).unwrap(),
+        content
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("code.rs")).unwrap(),
+        "fn main() {}"
+    );
+}
+
+#[test]
 fn test_save_basic() {
     let workspace = TempDir::new().unwrap();
     fs::write(workspace.path().join("hello.txt"), "hello").unwrap();

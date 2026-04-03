@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 /// Generate a 16-hex-char project ID from workspace path.
 pub fn project_id_from_path(path: &Path) -> String {
     let canonical = path.to_string_lossy();
-    let hash = blake3::hash(canonical.as_bytes());
-    hash.to_hex()[..16].to_string()
+    let hash = xxhash_rust::xxh3::xxh3_128(canonical.as_bytes());
+    format!("{:032x}", hash)[..16].to_string()
 }
 
 /// Store directory layout for a project.

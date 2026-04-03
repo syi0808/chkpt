@@ -6,16 +6,16 @@ use std::path::PathBuf;
 
 // ── helpers ──────────────────────────────────────────────────────────
 
-/// Convert a 64-char hex string to a [u8; 32] array.
-pub(crate) fn hex_to_bytes32(hex: &str) -> napi::Result<[u8; 32]> {
-    if hex.len() != 64 {
+/// Convert a 32-char hex string to a [u8; 16] array.
+pub(crate) fn hex_to_bytes32(hex: &str) -> napi::Result<[u8; 16]> {
+    if hex.len() != 32 || !hex.is_ascii() {
         return Err(napi::Error::new(
             napi::Status::InvalidArg,
-            format!("expected 64-char hex string, got {} chars", hex.len()),
+            format!("expected 32-char hex string, got {} chars", hex.len()),
         ));
     }
-    let mut bytes = [0u8; 32];
-    for i in 0..32 {
+    let mut bytes = [0u8; 16];
+    for i in 0..16 {
         bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|_| {
             napi::Error::new(
                 napi::Status::InvalidArg,
@@ -26,8 +26,8 @@ pub(crate) fn hex_to_bytes32(hex: &str) -> napi::Result<[u8; 32]> {
     Ok(bytes)
 }
 
-/// Convert a [u8; 32] array to a 64-char hex string.
-pub(crate) fn bytes32_to_hex(bytes: &[u8; 32]) -> String {
+/// Convert a [u8; 16] array to a 32-char hex string.
+pub(crate) fn bytes32_to_hex(bytes: &[u8; 16]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 

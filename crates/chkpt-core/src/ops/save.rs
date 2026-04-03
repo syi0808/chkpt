@@ -4,9 +4,9 @@ use crate::index::{FileEntry, FileIndex};
 use crate::ops::io_order::sort_scanned_refs_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
-use crate::store::blob::read_path_bytes;
+use crate::store::blob::{hex_to_bytes, read_or_mmap, read_path_bytes};
 use crate::store::catalog::{BlobLocation, CatalogSnapshot, ManifestEntry, MetadataCatalog};
-use crate::store::pack::{PackSet, PackWriter};
+use crate::store::pack::PackWriter;
 use crate::store::snapshot::{Snapshot, SnapshotStats};
 use crate::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -29,26 +29,10 @@ pub struct SaveResult {
     pub stats: SnapshotStats,
 }
 
-/// Convert a 64-char hex string to a [u8; 32] array.
-fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {
-    let mut bytes = [0u8; 32];
-    if hex.len() != 64 {
-        return Err(ChkpttError::Other(format!(
-            "Invalid hash length: {}",
-            hex.len()
-        )));
-    }
-    for i in 0..32 {
-        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| ChkpttError::Other("Invalid hex".into()))?;
-    }
-    Ok(bytes)
-}
-
 /// Represents a file with its blob hash after processing.
 struct ProcessedFile {
     relative_path: String,
-    blob_hash_bytes: [u8; 32],
+    blob_hash_bytes: [u8; 16],
     size: u64,
     mode: u32,
     entry_type: EntryType,
@@ -56,8 +40,7 @@ struct ProcessedFile {
 
 struct PreparedFile {
     relative_path: String,
-    blob_hash_hex: String,
-    blob_hash_bytes: [u8; 32],
+    blob_hash_bytes: [u8; 16],
     /// None if this hash was already seen (duplicate content — compression skipped)
     compressed: Option<Vec<u8>>,
     size: u64,
@@ -69,7 +52,7 @@ struct PreparedFile {
 }
 
 struct NewBlobRecord {
-    blob_hash: [u8; 32],
+    blob_hash: [u8; 16],
     size: u64,
 }
 
@@ -81,14 +64,13 @@ struct HardlinkKey {
 
 #[derive(Debug, Clone)]
 struct HardlinkPrepared {
-    blob_hash_hex: String,
-    blob_hash_bytes: [u8; 32],
+    blob_hash_bytes: [u8; 16],
 }
 
 const SEEN_HASH_SHARDS: usize = 64;
 const PREPARED_FILE_PIPELINE_SLOTS: usize = 64;
 struct ShardedSeenHashes {
-    shards: Vec<Mutex<HashSet<[u8; 32]>>>,
+    shards: Vec<Mutex<HashSet<[u8; 16]>>>,
 }
 
 impl ShardedSeenHashes {
@@ -103,7 +85,7 @@ impl ShardedSeenHashes {
     }
 
     #[inline]
-    fn insert(&self, hash: [u8; 32]) -> bool {
+    fn insert(&self, hash: [u8; 16]) -> bool {
         let shard_index = ((hash[0] as usize) << 8 | hash[1] as usize) % self.shards.len();
         let mut shard = self.shards[shard_index].lock().unwrap();
         shard.insert(hash)
@@ -142,10 +124,12 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // 6. Create blob store
     let packs_dir = layout.packs_dir();
-    let has_pack_objects = store_has_pack_objects(&packs_dir)?;
-    let pack_set = has_pack_objects
-        .then(|| PackSet::open_all(&packs_dir))
-        .transpose()?;
+    // Load all known blob hashes from the catalog's blob_index table.
+    // This relies on blob_index being authoritative (kept in sync by
+    // bulk_upsert_blob_locations after each pack write). If the catalog
+    // and pack store ever diverge (e.g. manual .dat deletion), a store
+    // repair operation would be needed.
+    let known_blob_hashes = catalog.all_blob_hashes()?;
     let mut pack_writer = PackWriter::new(&packs_dir)?;
 
     // 7. Process each scanned file: check index, hash, store blob
@@ -208,7 +192,6 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         |prepared| {
             let PreparedFile {
                 relative_path,
-                blob_hash_hex: _,
                 blob_hash_bytes,
                 compressed,
                 size,
@@ -221,10 +204,8 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
             total_bytes += size;
             if let Some(compressed) = compressed {
-                let exists_in_pack = pack_set
-                    .as_ref()
-                    .is_some_and(|ps| ps.contains_bytes(&blob_hash_bytes));
-                if !exists_in_pack {
+                let exists_in_store = known_blob_hashes.contains(&blob_hash_bytes);
+                if !exists_in_store {
                     pack_writer.add_pre_compressed_bytes(blob_hash_bytes, compressed)?;
                     new_blob_records.push(NewBlobRecord {
                         blob_hash: blob_hash_bytes,
@@ -393,7 +374,7 @@ fn root_tree_hash_for_snapshot(
     catalog: &MetadataCatalog,
     snapshot: &CatalogSnapshot,
     tree_store: &TreeStore,
-) -> Result<[u8; 32]> {
+) -> Result<[u8; 16]> {
     if let Some(root_tree_hash) = snapshot.root_tree_hash {
         return Ok(root_tree_hash);
     }
@@ -452,32 +433,31 @@ fn cached_processed_file(
     None
 }
 
-fn prepare_file(
-    scanned: &ScannedFile,
-    seen_hashes: &ShardedSeenHashes,
-    compressor: &mut zstd::bulk::Compressor<'_>,
-) -> Result<PreparedFile> {
-    let content = read_path_bytes(&scanned.absolute_path, scanned.is_symlink)?;
-
-    // Hash (BLAKE3 is ~6 GB/s, negligible cost)
-    let hash = blake3::hash(&content);
-    let blob_hash_bytes: [u8; 32] = *hash.as_bytes();
-
-    // Only compress if this hash hasn't been seen yet (use raw bytes, no hex conversion)
-    let is_new = seen_hashes.insert(blob_hash_bytes);
-
-    let compressed = if is_new {
-        Some(compress_with_worker_context(&content, compressor)?)
+fn prepare_file(scanned: &ScannedFile, seen_hashes: &ShardedSeenHashes) -> Result<PreparedFile> {
+    let (blob_hash_bytes, compressed) = if scanned.is_symlink {
+        let content = read_path_bytes(&scanned.absolute_path, true)?;
+        let blob_hash_bytes = xxhash_rust::xxh3::xxh3_128(&content).to_le_bytes();
+        let is_new = seen_hashes.insert(blob_hash_bytes);
+        let compressed = if is_new {
+            Some(compress_with_worker_context(&content))
+        } else {
+            None
+        };
+        (blob_hash_bytes, compressed)
     } else {
-        None
+        let content = read_or_mmap(&scanned.absolute_path)?;
+        let blob_hash_bytes = xxhash_rust::xxh3::xxh3_128(content.as_ref()).to_le_bytes();
+        let is_new = seen_hashes.insert(blob_hash_bytes);
+        let compressed = if is_new {
+            Some(compress_with_worker_context(content.as_ref()))
+        } else {
+            None
+        };
+        (blob_hash_bytes, compressed)
     };
-
-    // Defer hex conversion to caller (only needed for pack writer)
-    let blob_hash_hex = hash.to_hex().to_string();
 
     Ok(PreparedFile {
         relative_path: scanned.relative_path.clone(),
-        blob_hash_hex,
         blob_hash_bytes,
         compressed,
         size: scanned.size,
@@ -507,14 +487,12 @@ fn hardlink_key(scanned: &ScannedFile) -> Option<HardlinkKey> {
 fn prepare_file_with_hardlink_cache(
     scanned: &ScannedFile,
     seen_hashes: &ShardedSeenHashes,
-    compressor: &mut zstd::bulk::Compressor<'_>,
     hardlinks: &mut HashMap<HardlinkKey, HardlinkPrepared>,
 ) -> Result<PreparedFile> {
     if let Some(key) = hardlink_key(scanned) {
         if let Some(cached) = hardlinks.get(&key) {
             return Ok(PreparedFile {
                 relative_path: scanned.relative_path.clone(),
-                blob_hash_hex: cached.blob_hash_hex.clone(),
                 blob_hash_bytes: cached.blob_hash_bytes,
                 compressed: None,
                 size: scanned.size,
@@ -530,18 +508,17 @@ fn prepare_file_with_hardlink_cache(
             });
         }
 
-        let prepared = prepare_file(scanned, seen_hashes, compressor)?;
+        let prepared = prepare_file(scanned, seen_hashes)?;
         hardlinks.insert(
             key,
             HardlinkPrepared {
-                blob_hash_hex: prepared.blob_hash_hex.clone(),
                 blob_hash_bytes: prepared.blob_hash_bytes,
             },
         );
         return Ok(prepared);
     }
 
-    prepare_file(scanned, seen_hashes, compressor)
+    prepare_file(scanned, seen_hashes)
 }
 
 fn split_scanned_refs_preserving_hardlinks<'a>(
@@ -571,11 +548,11 @@ fn split_scanned_refs_preserving_hardlinks<'a>(
     chunks
 }
 
-fn compress_with_worker_context(
-    content: &[u8],
-    compressor: &mut zstd::bulk::Compressor<'_>,
-) -> Result<Vec<u8>> {
-    Ok(compressor.compress(content)?)
+fn compress_with_worker_context(content: &[u8]) -> Vec<u8> {
+    use lz4_flex::frame::FrameEncoder;
+    let mut encoder = FrameEncoder::new(Vec::new());
+    std::io::Write::write_all(&mut encoder, content).unwrap();
+    encoder.finish().unwrap()
 }
 
 /// Prepare files with a bounded producer/consumer pipeline so compressed blobs
@@ -601,15 +578,9 @@ where
         .min(scanned_files.len());
 
     if worker_count <= 1 {
-        let mut compressor = zstd::bulk::Compressor::new(1)?;
         let mut hardlinks = HashMap::new();
         for scanned in scanned_files {
-            let prepared = prepare_file_with_hardlink_cache(
-                scanned,
-                seen_hashes,
-                &mut compressor,
-                &mut hardlinks,
-            )?;
+            let prepared = prepare_file_with_hardlink_cache(scanned, seen_hashes, &mut hardlinks)?;
             let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
             emit(
                 progress,
@@ -635,22 +606,11 @@ where
             .map(|chunk| {
                 let sender = sender.clone();
                 scope.spawn(move || {
-                    let mut compressor = match zstd::bulk::Compressor::new(1) {
-                        Ok(compressor) => compressor,
-                        Err(error) => {
-                            let _ = sender.send(Err(error.into()));
-                            return;
-                        }
-                    };
                     let mut hardlinks = HashMap::new();
 
                     for scanned in chunk {
-                        let result = prepare_file_with_hardlink_cache(
-                            scanned,
-                            seen_hashes,
-                            &mut compressor,
-                            &mut hardlinks,
-                        );
+                        let result =
+                            prepare_file_with_hardlink_cache(scanned, seen_hashes, &mut hardlinks);
                         let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
                         emit(
                             progress,
@@ -706,13 +666,12 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
     all_dirs.insert(String::new()); // root always exists
 
     for pf in processed_files {
-        let parent = if let Some(pos) = pf.relative_path.rfind('/') {
-            pf.relative_path[..pos].to_string()
-        } else {
-            String::new()
+        let parent = match pf.relative_path.rfind('/') {
+            Some(pos) => &pf.relative_path[..pos],
+            None => "",
         };
-        dir_files.entry(parent.clone()).or_default().push(pf);
-        register_directory_hierarchy(&parent, &mut all_dirs, &mut child_dirs);
+        dir_files.entry(parent.to_string()).or_default().push(pf);
+        register_directory_hierarchy(parent, &mut all_dirs, &mut child_dirs);
     }
 
     // Sort directories bottom-up (deepest first)
@@ -734,7 +693,7 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
     // Phase 1: Compute all tree hashes and encoded data in memory
     let mut dir_hashes: BTreeMap<String, String> = BTreeMap::new();
     let mut pack_entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(dir_list.len());
-    let mut known_hashes: HashSet<[u8; 32]> = HashSet::with_capacity(dir_list.len());
+    let mut known_hashes: HashSet<[u8; 16]> = HashSet::with_capacity(dir_list.len());
 
     for dir in &dir_list {
         let file_count = dir_files.get(dir).map(|files| files.len()).unwrap_or(0);
@@ -746,13 +705,12 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
 
         if let Some(files) = dir_files.get(dir) {
             for pf in files {
-                let name = if let Some(pos) = pf.relative_path.rfind('/') {
-                    pf.relative_path[pos + 1..].to_string()
-                } else {
-                    pf.relative_path.clone()
+                let name = match pf.relative_path.rfind('/') {
+                    Some(pos) => &pf.relative_path[pos + 1..],
+                    None => &pf.relative_path,
                 };
                 entries.push(TreeEntry {
-                    name,
+                    name: name.to_string(),
                     entry_type: pf.entry_type,
                     hash: pf.blob_hash_bytes,
                     size: pf.size,
@@ -766,13 +724,12 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
                 let sub_hash = dir_hashes.get(sub_dir).ok_or_else(|| {
                     ChkpttError::Other(format!("Missing tree hash for directory '{}'", sub_dir))
                 })?;
-                let sub_name = if let Some(pos) = sub_dir.rfind('/') {
-                    sub_dir[pos + 1..].to_string()
-                } else {
-                    sub_dir.clone()
+                let sub_name = match sub_dir.rfind('/') {
+                    Some(pos) => &sub_dir[pos + 1..],
+                    None => sub_dir.as_str(),
                 };
                 entries.push(TreeEntry {
-                    name: sub_name,
+                    name: sub_name.to_string(),
                     entry_type: EntryType::Dir,
                     hash: hex_to_bytes(sub_hash)?,
                     size: 0,
@@ -783,9 +740,8 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
 
         entries.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         let encoded = bitcode::encode(&entries);
-        let hash = blake3::hash(&encoded);
-        let hash_bytes = *hash.as_bytes();
-        let hash_hex = hash.to_hex().to_string();
+        let hash_bytes = xxhash_rust::xxh3::xxh3_128(&encoded).to_le_bytes();
+        let hash_hex = crate::store::blob::bytes_to_hex(&hash_bytes);
 
         dir_hashes.insert(dir.clone(), hash_hex.clone());
         if known_hashes.insert(hash_bytes) {
@@ -811,22 +767,29 @@ fn register_directory_hierarchy(
         return;
     }
 
-    let mut parent = String::new();
-    let mut current = String::with_capacity(dir.len());
-    for segment in dir.split('/') {
-        if !current.is_empty() {
-            current.push('/');
-        }
-        current.push_str(segment);
+    // Fast path: if the full dir is already known, all ancestors are too
+    if all_dirs.contains(dir) {
+        return;
+    }
 
-        if all_dirs.insert(current.clone()) {
-            child_dirs
-                .entry(parent.clone())
-                .or_default()
-                .push(current.clone());
+    let mut segments_end = Vec::new();
+    for (i, ch) in dir.char_indices() {
+        if ch == '/' {
+            segments_end.push(i);
         }
-        parent.clear();
-        parent.push_str(&current);
+    }
+    segments_end.push(dir.len());
+
+    let mut parent = String::new();
+    for &end in &segments_end {
+        let current = &dir[..end];
+        if all_dirs.insert(current.to_string()) {
+            child_dirs
+                .entry(parent)
+                .or_default()
+                .push(current.to_string());
+        }
+        parent = current.to_string();
     }
 }
 
@@ -840,11 +803,11 @@ mod tests {
 
     #[test]
     fn test_hex_to_bytes() {
-        let hex = "a3b2c1d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let hex = "a3b2c1d4e5f60718293a4b5c6d7e8f90";
         let bytes = hex_to_bytes(hex).unwrap();
         assert_eq!(bytes[0], 0xa3);
         assert_eq!(bytes[1], 0xb2);
-        assert_eq!(bytes[31], 0x90);
+        assert_eq!(bytes[15], 0x90);
     }
 
     #[test]
@@ -877,10 +840,15 @@ mod tests {
     #[test]
     fn test_compress_with_worker_context_roundtrip() {
         let content = b"compression-context-roundtrip-data";
-        let mut compressor = zstd::bulk::Compressor::new(1).unwrap();
 
-        let compressed = compress_with_worker_context(content, &mut compressor).unwrap();
-        let decompressed = zstd::decode_all(&compressed[..]).unwrap();
+        let compressed = compress_with_worker_context(content);
+        let decompressed = {
+            use lz4_flex::frame::FrameDecoder;
+            let mut decoder = FrameDecoder::new(&compressed[..]);
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut decoder, &mut buf).unwrap();
+            buf
+        };
 
         assert_eq!(decompressed, content);
     }
@@ -888,7 +856,7 @@ mod tests {
     #[test]
     fn test_sharded_seen_hashes_dedups_single_thread() {
         let seen = ShardedSeenHashes::new(8);
-        let hash = [7u8; 32];
+        let hash = [7u8; 16];
 
         assert!(seen.insert(hash));
         assert!(!seen.insert(hash));
@@ -898,7 +866,7 @@ mod tests {
     fn test_sharded_seen_hashes_dedups_multi_thread() {
         let seen = Arc::new(ShardedSeenHashes::new(1024));
         let unique_inserts = Arc::new(AtomicUsize::new(0));
-        let duplicate_hash = [9u8; 32];
+        let duplicate_hash = [9u8; 16];
 
         std::thread::scope(|scope| {
             for i in 0..8u8 {
@@ -908,7 +876,7 @@ mod tests {
                     if seen.insert(duplicate_hash) {
                         unique_inserts.fetch_add(1, Ordering::Relaxed);
                     }
-                    let mut unique_hash = [0u8; 32];
+                    let mut unique_hash = [0u8; 16];
                     unique_hash[0] = i;
                     if seen.insert(unique_hash) {
                         unique_inserts.fetch_add(1, Ordering::Relaxed);
@@ -958,28 +926,17 @@ mod tests {
         let original_scanned = scanned_from_path("original.txt", &original);
         let alias_scanned = scanned_from_path("alias.txt", &alias);
         let seen_hashes = ShardedSeenHashes::new(2);
-        let mut compressor = zstd::bulk::Compressor::new(1).unwrap();
         let mut hardlinks = HashMap::new();
 
-        let first = prepare_file_with_hardlink_cache(
-            &original_scanned,
-            &seen_hashes,
-            &mut compressor,
-            &mut hardlinks,
-        )
-        .unwrap();
-        let second = prepare_file_with_hardlink_cache(
-            &alias_scanned,
-            &seen_hashes,
-            &mut compressor,
-            &mut hardlinks,
-        )
-        .unwrap();
+        let first =
+            prepare_file_with_hardlink_cache(&original_scanned, &seen_hashes, &mut hardlinks)
+                .unwrap();
+        let second =
+            prepare_file_with_hardlink_cache(&alias_scanned, &seen_hashes, &mut hardlinks).unwrap();
 
         assert!(first.compressed.is_some());
         assert!(second.compressed.is_none());
         assert_eq!(first.blob_hash_bytes, second.blob_hash_bytes);
-        assert_eq!(first.blob_hash_hex, second.blob_hash_hex);
     }
 
     fn scanned(relative_path: &str, inode: Option<u64>) -> ScannedFile {

@@ -201,6 +201,32 @@ fn test_restore_round_trips_symlinks() {
 }
 
 #[test]
+fn test_restore_deeply_nested_many_files_same_dir() {
+    let workspace = TempDir::new().unwrap();
+    let deep_dir = workspace.path().join("a/b/c/d/e");
+    fs::create_dir_all(&deep_dir).unwrap();
+    for i in 0..50 {
+        fs::write(
+            deep_dir.join(format!("file_{}.txt", i)),
+            format!("content_{}", i),
+        )
+        .unwrap();
+    }
+
+    let r = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    // Remove all files
+    fs::remove_dir_all(workspace.path().join("a")).unwrap();
+
+    restore(workspace.path(), &r.snapshot_id, RestoreOptions::default()).unwrap();
+
+    for i in 0..50 {
+        let content = fs::read_to_string(deep_dir.join(format!("file_{}.txt", i))).unwrap();
+        assert_eq!(content, format!("content_{}", i));
+    }
+}
+
+#[test]
 fn test_restore_works_without_snapshot_or_tree_files() {
     let workspace = TempDir::new().unwrap();
     fs::write(workspace.path().join("a.txt"), "v1").unwrap();
@@ -222,4 +248,43 @@ fn test_restore_works_without_snapshot_or_tree_files() {
         fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
         "v1"
     );
+}
+
+#[test]
+fn test_restore_removes_many_files_correctly() {
+    let workspace = TempDir::new().unwrap();
+    for i in 0..5 {
+        fs::write(
+            workspace.path().join(format!("keep_{}.txt", i)),
+            format!("keep_{}", i),
+        )
+        .unwrap();
+    }
+    let snapshot = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    fs::create_dir_all(workspace.path().join("extra")).unwrap();
+    for i in 0..200 {
+        fs::write(
+            workspace.path().join(format!("extra/file_{}.txt", i)),
+            format!("extra_{}", i),
+        )
+        .unwrap();
+    }
+
+    let result = restore(
+        workspace.path(),
+        &snapshot.snapshot_id,
+        RestoreOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(result.files_removed, 200);
+    assert_eq!(result.files_unchanged, 5);
+    assert!(!workspace.path().join("extra").exists());
+    for i in 0..5 {
+        assert_eq!(
+            fs::read_to_string(workspace.path().join(format!("keep_{}.txt", i))).unwrap(),
+            format!("keep_{}", i)
+        );
+    }
 }

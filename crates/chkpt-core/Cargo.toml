@@ -6,8 +6,8 @@ description = "Core library for chkpt – a fast, content-addressable checkpoint
 license = "Apache-2.0"
 
 [dependencies]
-blake3 = { workspace = true }
-zstd = { workspace = true }
+xxhash-rust = { workspace = true }
+lz4_flex = { workspace = true }
 rusqlite = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
@@ -28,7 +28,15 @@ tokio = { workspace = true }
 tempfile = { workspace = true }
 rustix = { workspace = true }
 libc = "0.2"
+lz4_flex = { workspace = true }
+xxhash-rust = { workspace = true }
+blake3 = "1"
+zstd = "0.13"
 
 [[bench]]
 name = "save_pipeline"
+harness = false
+
+[[bench]]
+name = "hash_compress_compare"
 harness = false

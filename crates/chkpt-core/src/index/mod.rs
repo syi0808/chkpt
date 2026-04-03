@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct FileEntry {
     pub path: String,
-    pub blob_hash: [u8; 32],
+    pub blob_hash: [u8; 16],
     pub size: u64,
     pub mtime_secs: i64,
     pub mtime_nanos: i64,
@@ -23,14 +23,24 @@ impl FileIndex {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let entries = match std::fs::read(&path) {
-            Ok(data) => {
-                let entries_vec: Vec<FileEntry> = bitcode::decode(&data)?;
-                let mut entries = HashMap::with_capacity(entries_vec.len());
-                for entry in entries_vec {
-                    entries.insert(entry.path.clone(), entry);
+            Ok(data) => match bitcode::decode::<Vec<FileEntry>>(&data) {
+                Ok(entries_vec) => {
+                    let mut entries = HashMap::with_capacity(entries_vec.len());
+                    for entry in entries_vec {
+                        entries.insert(entry.path.clone(), entry);
+                    }
+                    entries
                 }
-                entries
-            }
+                Err(_) => {
+                    // Decode failure means the on-disk index was written by an
+                    // incompatible version (e.g. 32-byte hashes vs. 16-byte).
+                    // The index is a pure performance cache: treat it as empty
+                    // so the next save falls back to a full scan rather than
+                    // hard-failing.  The stale file will be overwritten on the
+                    // next successful flush.
+                    HashMap::new()
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
             Err(error) => return Err(error.into()),
         };

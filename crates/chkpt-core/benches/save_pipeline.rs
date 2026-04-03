@@ -85,9 +85,9 @@ fn bench_read_hash(
     read_fn: impl Fn(&ScannedFile) -> Vec<u8> + Sync,
 ) -> u128 {
     let t = Instant::now();
-    let _results: Vec<[u8; 32]> = parallel_map(files, threads, |s| {
+    let _results: Vec<[u8; 16]> = parallel_map(files, threads, |s| {
         let content = read_fn(s);
-        *blake3::hash(&content).as_bytes()
+        xxhash_rust::xxh3::xxh3_128(&content).to_le_bytes()
     });
     let ms = t.elapsed().as_millis();
     println!("  {:<30} {:>6}ms  ({} threads)", label, ms, threads);
@@ -297,22 +297,30 @@ fn main() {
     // ── Phase 4: compress + pack (using best config) ──
     println!();
     println!("--- compress + pack (best config) ---");
-    let seen: HashSet<[u8; 32]> = HashSet::new();
+    let seen: HashSet<[u8; 16]> = HashSet::new();
     let seen = Arc::new(Mutex::new(seen));
 
     let t = Instant::now();
     let compress_results: Vec<Option<(String, Vec<u8>)>> =
         parallel_map(&inode_sorted, best_threads, |s| {
             let content = read_std(s);
-            let hash = blake3::hash(&content);
-            let hash_bytes: [u8; 32] = *hash.as_bytes();
+            let hash_bytes: [u8; 16] = xxhash_rust::xxh3::xxh3_128(&content).to_le_bytes();
             let is_new = {
                 let mut set = seen.lock().unwrap();
                 set.insert(hash_bytes)
             };
             if is_new {
-                let compressed = zstd::encode_all(&content[..], 1).unwrap();
-                Some((hash.to_hex().to_string(), compressed))
+                let compressed = {
+                    use lz4_flex::frame::FrameEncoder;
+                    let mut encoder = FrameEncoder::new(Vec::new());
+                    std::io::Write::write_all(&mut encoder, &content).unwrap();
+                    encoder.finish().unwrap()
+                };
+                let hash_hex = hash_bytes
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>();
+                Some((hash_hex, compressed))
             } else {
                 None
             }
@@ -347,14 +355,14 @@ fn main() {
     // ── Phase 5: Build tree ──
     struct PF {
         relative_path: String,
-        blob_hash_bytes: [u8; 32],
+        blob_hash_bytes: [u8; 16],
         size: u64,
         mode: u32,
     }
     // Use first hash run results for tree (need to re-hash for consistency)
-    let hash_results: Vec<[u8; 32]> = parallel_map(&inode_sorted, best_threads, |s| {
+    let hash_results: Vec<[u8; 16]> = parallel_map(&inode_sorted, best_threads, |s| {
         let content = read_std(s);
-        *blake3::hash(&content).as_bytes()
+        xxhash_rust::xxh3::xxh3_128(&content).to_le_bytes()
     });
     let processed: Vec<PF> = inode_sorted
         .iter()
@@ -432,8 +440,8 @@ fn main() {
                 } else {
                     sub_dir.clone()
                 };
-                let mut hash_bytes = [0u8; 32];
-                for i in 0..32 {
+                let mut hash_bytes = [0u8; 16];
+                for i in 0..16 {
                     hash_bytes[i] = u8::from_str_radix(&sub_hash[i * 2..i * 2 + 2], 16).unwrap();
                 }
                 entries.push(TreeEntry {
@@ -447,7 +455,11 @@ fn main() {
         }
         entries.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         let encoded = bitcode::encode(&entries);
-        let hash_hex = blake3::hash(&encoded).to_hex().to_string();
+        let hash_bytes = xxhash_rust::xxh3::xxh3_128(&encoded).to_le_bytes();
+        let hash_hex = hash_bytes
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
         dir_hashes.insert(dir.clone(), hash_hex.clone());
         if known_hashes.insert(hash_hex.clone()) {
             pack_entries.push((hash_hex, encoded));
