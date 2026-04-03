@@ -4,17 +4,30 @@
 
 > Save and restore your entire workspace without touching Git.
 
-chkpt is a fast, content-addressable checkpoint system. One `chkpt save` before a big refactor, dependency update, or AI agent run, and you can roll back anytime. Unlike `git stash` or temporary branches, chkpt captures everything (including untracked files), deduplicates content with BLAKE3 hashing, and compresses with zstd. Snapshots are fast and take up little disk space.
+chkpt is a fast, content-addressable checkpoint system. One `chkpt save` before a big refactor, dependency update, or AI agent run, and you can roll back anytime. Unlike `git stash` or temporary branches, chkpt captures everything (including untracked files), deduplicates content with XXH3-128 hashing, and compresses with LZ4. Snapshots are fast and take up little disk space.
 
 ## Features
 
-- **Content-addressed deduplication** via BLAKE3 hashing. Identical files are stored only once.
-- **zstd compression** for every blob, keeping storage small.
+- **Content-addressed deduplication** via XXH3-128 hashing. Identical files are stored only once.
+- **LZ4 compression** for every blob, keeping storage small.
 - **Incremental saves** with a SQLite index that detects only changed files.
 - **Catalog-backed metadata** for fast snapshot lookup, listing, and restore planning.
 - **Atomic restore** that keeps your workspace intact if something fails midway.
 - **Optional dependency scanning** when you want to include `node_modules`, `.venv`, and similar directories.
 - **Multiple interfaces**: CLI, Node.js API, MCP server, and Claude Code plugin.
+
+## Performance
+
+Benchmarked on MacBook Pro (Apple M2 Pro, 16 GB RAM, APFS SSD). Release build, median of 3 runs.
+
+| Project | Files | Size | Cold Save | Incr. Save | Restore | Storage | Ratio |
+|---------|------:|-----:|----------:|-----------:|--------:|--------:|------:|
+| [React](https://github.com/facebook/react) | 6,879 | 34.4 MB | 0.26s | 0.05s | 0.03s | 19.5 MB | 1.7x |
+| [Rust](https://github.com/rust-lang/rust) | 58,760 | 195.9 MB | 2.04s | 0.33s | 0.18s | 96.0 MB | 2.0x |
+| [Linux kernel](https://github.com/torvalds/linux) | 92,923 | 1.4 GB | 2.95s | 0.47s | 0.24s | 503.3 MB | 2.9x |
+
+> **Cold Save** = first checkpoint with empty store. **Incr. Save** = re-save after modifying 5 files.
+> **Storage** = total `.chkpt` store size after cold save (LZ4-compressed, content-deduplicated). **Ratio** = original size / storage size.
 
 ## Getting Started
 
@@ -113,9 +126,9 @@ Workspace                      ~/.chkpt/stores/
 ```
 
 1. **Scan**: walk files according to `.chkptignore` rules
-2. **Hash**: generate a BLAKE3 content hash for each file
+2. **Hash**: generate an XXH3-128 content hash for each file
 3. **Deduplicate**: skip content already in the store
-4. **Compress & store**: write new content with zstd compression
+4. **Compress & store**: write new content with LZ4 compression
 5. **Record snapshot**: persist metadata and manifest in `catalog.sqlite`
 
 ## Project Structure
@@ -133,7 +146,7 @@ crates/
 ## FAQ
 
 **How much disk space do checkpoints use?**
-chkpt deduplicates at the file level using BLAKE3 content hashing and compresses blobs with zstd. If most files haven't changed between saves, the incremental cost is minimal.
+chkpt deduplicates at the file level using XXH3-128 content hashing and compresses blobs with LZ4. If most files haven't changed between saves, the incremental cost is minimal.
 
 **Does chkpt replace Git?**
 No. chkpt is for quick, local snapshots, not version control. Think of it as a "save game" for your workspace. Use Git for collaboration and history; use chkpt for instant rollback points.

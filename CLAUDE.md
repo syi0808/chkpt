@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-chkpt is a fast, content-addressable checkpoint system for saving and restoring workspace snapshots without touching Git. It uses BLAKE3 hashing for deduplication and zstd compression, with an SQLite index for incremental saves.
+chkpt is a fast, content-addressable checkpoint system for saving and restoring workspace snapshots without touching Git. It uses XXH3-128 hashing for deduplication and LZ4 compression, with an SQLite index for incremental saves.
 
 This repository is a Cargo workspace.
 
