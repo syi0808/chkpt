@@ -443,7 +443,7 @@ fn prepare_file(
         let blob_hash_bytes = *blake3::hash(&content).as_bytes();
         let is_new = seen_hashes.insert(blob_hash_bytes);
         let compressed = if is_new {
-            Some(compress_with_worker_context(&content, compressor)?)
+            Some(compress_with_worker_context(&content, compressor, false)?)
         } else {
             None
         };
@@ -453,7 +453,11 @@ fn prepare_file(
         let blob_hash_bytes = *blake3::hash(content.as_ref()).as_bytes();
         let is_new = seen_hashes.insert(blob_hash_bytes);
         let compressed = if is_new {
-            Some(compress_with_worker_context(content.as_ref(), compressor)?)
+            Some(compress_with_worker_context(
+                content.as_ref(),
+                compressor,
+                should_skip_compression(&scanned.relative_path),
+            )?)
         } else {
             None
         };
@@ -556,7 +560,12 @@ fn split_scanned_refs_preserving_hardlinks<'a>(
 fn compress_with_worker_context(
     content: &[u8],
     compressor: &mut zstd::bulk::Compressor<'_>,
+    skip_compression: bool,
 ) -> Result<Vec<u8>> {
+    if skip_compression {
+        // zstd level 0 creates a valid zstd frame storing data verbatim
+        return Ok(zstd::encode_all(content, 0)?);
+    }
     Ok(compressor.compress(content)?)
 }
 
@@ -813,7 +822,6 @@ fn register_directory_hierarchy(
 }
 
 /// Check if file extension indicates already-compressed content.
-#[allow(dead_code)]
 fn should_skip_compression(path: &str) -> bool {
     let ext = match path.rsplit_once('.') {
         Some((_, ext)) => ext,
@@ -901,7 +909,7 @@ mod tests {
         let content = b"compression-context-roundtrip-data";
         let mut compressor = zstd::bulk::Compressor::new(1).unwrap();
 
-        let compressed = compress_with_worker_context(content, &mut compressor).unwrap();
+        let compressed = compress_with_worker_context(content, &mut compressor, false).unwrap();
         let decompressed = zstd::decode_all(&compressed[..]).unwrap();
 
         assert_eq!(decompressed, content);

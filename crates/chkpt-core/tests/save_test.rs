@@ -8,6 +8,31 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
+fn test_save_pre_compressed_file_stored_without_recompression() {
+    let workspace = TempDir::new().unwrap();
+    let content = b"fake-jpeg-content-that-is-already-compressed";
+    fs::write(workspace.path().join("photo.jpg"), content).unwrap();
+    fs::write(workspace.path().join("code.rs"), "fn main() {}").unwrap();
+
+    let result = save(workspace.path(), SaveOptions::default()).unwrap();
+    assert_eq!(result.stats.new_objects, 2);
+    assert_eq!(result.stats.total_files, 2);
+
+    fs::remove_file(workspace.path().join("photo.jpg")).unwrap();
+    fs::remove_file(workspace.path().join("code.rs")).unwrap();
+
+    chkpt_core::ops::restore::restore(
+        workspace.path(),
+        &result.snapshot_id,
+        chkpt_core::ops::restore::RestoreOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(fs::read(workspace.path().join("photo.jpg")).unwrap(), content);
+    assert_eq!(fs::read_to_string(workspace.path().join("code.rs")).unwrap(), "fn main() {}");
+}
+
+#[test]
 fn test_save_basic() {
     let workspace = TempDir::new().unwrap();
     fs::write(workspace.path().join("hello.txt"), "hello").unwrap();
