@@ -808,32 +808,23 @@ fn cleanup_removed_file_parents(root: &Path, removed_paths: &[String]) -> Result
         return Ok(());
     }
 
-    let mut candidates = HashSet::with_capacity(removed_paths.len());
+    // Collect unique parent directory relative paths with pre-computed depth
+    let mut dir_depths: HashMap<String, usize> = HashMap::new();
     for removed_path in removed_paths {
-        let mut current = root.join(removed_path);
-        while let Some(parent) = current.parent() {
-            if parent == root {
-                candidates.insert(parent.to_path_buf());
-                break;
-            }
-            if !parent.starts_with(root) {
-                break;
-            }
-            candidates.insert(parent.to_path_buf());
-            current = parent.to_path_buf();
+        let mut path_str = removed_path.as_str();
+        while let Some(pos) = path_str.rfind('/') {
+            path_str = &path_str[..pos];
+            let depth = path_str.matches('/').count() + 1;
+            dir_depths.entry(path_str.to_string()).or_insert(depth);
         }
     }
 
-    let mut candidates: Vec<_> = candidates.into_iter().filter(|dir| dir != root).collect();
-    candidates.sort_unstable_by(|left, right| {
-        right
-            .components()
-            .count()
-            .cmp(&left.components().count())
-            .then_with(|| left.cmp(right))
-    });
+    // Sort deepest-first so we remove leaf directories before parents
+    let mut candidates: Vec<(String, usize)> = dir_depths.into_iter().collect();
+    candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    for dir in candidates {
+    for (relative_dir, _depth) in candidates {
+        let dir = root.join(&relative_dir);
         match std::fs::remove_dir(&dir) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
