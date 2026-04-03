@@ -3,8 +3,6 @@ resolver = "2"
 members = ["crates/chkpt-core", "crates/chkpt-cli", "crates/chkpt-mcp", "crates/chkpt-napi"]
 
 [workspace.dependencies]
-blake3 = "1"
-zstd = "0.13"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
