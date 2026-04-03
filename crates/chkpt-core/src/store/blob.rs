@@ -5,6 +5,37 @@ use std::path::Path;
 
 const HASH_FILE_MMAP_THRESHOLD: u64 = 256 * 1024;
 
+/// Zero-copy file content: small files are heap-allocated, large files are memory-mapped.
+pub enum FileContent {
+    Vec(Vec<u8>),
+    Mmap(Mmap),
+}
+
+impl AsRef<[u8]> for FileContent {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            FileContent::Vec(v) => v.as_slice(),
+            FileContent::Mmap(m) => m.as_ref(),
+        }
+    }
+}
+
+/// Read a file into a `FileContent`. Files >= 256 KB are memory-mapped; smaller files
+/// are read into a heap-allocated `Vec<u8>`.
+pub fn read_or_mmap(path: &Path) -> Result<FileContent> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.len() >= HASH_FILE_MMAP_THRESHOLD {
+        // SAFETY: the file is opened read-only and we do not mutate it through the mapping.
+        let mmap = unsafe { Mmap::map(&file) }?;
+        return Ok(FileContent::Mmap(mmap));
+    }
+    let mut buf = Vec::with_capacity(metadata.len() as usize);
+    let mut file = file;
+    file.read_to_end(&mut buf)?;
+    Ok(FileContent::Vec(buf))
+}
+
 /// Compute BLAKE3 hash of content as raw bytes.
 pub fn hash_content_bytes(content: &[u8]) -> [u8; 32] {
     *blake3::hash(content).as_bytes()
