@@ -28,8 +28,14 @@ fn test_save_pre_compressed_file_stored_without_recompression() {
     )
     .unwrap();
 
-    assert_eq!(fs::read(workspace.path().join("photo.jpg")).unwrap(), content);
-    assert_eq!(fs::read_to_string(workspace.path().join("code.rs")).unwrap(), "fn main() {}");
+    assert_eq!(
+        fs::read(workspace.path().join("photo.jpg")).unwrap(),
+        content
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("code.rs")).unwrap(),
+        "fn main() {}"
+    );
 }
 
 #[test]
