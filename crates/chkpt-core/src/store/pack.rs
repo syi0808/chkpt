@@ -2,19 +2,18 @@ use crate::error::{ChkpttError, Result};
 use crate::store::blob::{hash_content, hex_to_bytes};
 use memmap2::Mmap;
 use std::collections::HashMap;
-use std::io::{BufWriter, Cursor, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
-const PACK_MAGIC: &[u8; 4] = b"CHKP";
-const PACK_VERSION: u32 = 1;
-const IDX_ENTRY_SIZE: usize = 32 + 8 + 8; // hash + offset + size
-const HEADER_SIZE: u64 = 12; // MAGIC(4) + VERSION(4) + COUNT(4)
+const PACK_MAGIC: &[u8; 4] = b"CHKL";
+const IDX_ENTRY_SIZE: usize = 16 + 8 + 8; // hash + offset + size
+const HEADER_SIZE: u64 = 8; // MAGIC(4) + COUNT(4)
 
 /// In-memory index entry for a pack.
 #[derive(Debug, Clone)]
 struct IndexEntry {
-    hash: [u8; 32],
+    hash: [u8; 16],
     offset: u64,
     size: u64,
 }
@@ -28,7 +27,7 @@ pub struct PackLocation {
 
 pub struct PackWriter {
     writer: BufWriter<NamedTempFile>,
-    hasher: blake3::Hasher,
+    hasher: xxhash_rust::xxh3::Xxh3,
     idx_entries: Vec<IndexEntry>,
     offset: u64,
     packs_dir: PathBuf,
@@ -39,11 +38,11 @@ impl PackWriter {
         std::fs::create_dir_all(packs_dir)?;
         let dat_tmp = NamedTempFile::new_in(packs_dir)?;
         let mut writer = BufWriter::with_capacity(256 * 1024, dat_tmp);
-        // Write 12-byte placeholder header (will be overwritten in finish)
+        // Write 8-byte placeholder header (will be overwritten in finish)
         let placeholder = [0u8; HEADER_SIZE as usize];
         writer.write_all(&placeholder)?;
         // Start incremental hasher — header will be re-hashed in finish()
-        let hasher = blake3::Hasher::new();
+        let hasher = xxhash_rust::xxh3::Xxh3::new();
         Ok(Self {
             writer,
             hasher,
@@ -56,7 +55,7 @@ impl PackWriter {
     pub fn add(&mut self, content: &[u8]) -> Result<String> {
         let hash_hex = hash_content(content);
         let hash = hex_to_bytes(&hash_hex)?;
-        let compressed = zstd::encode_all(content, 1)?;
+        let compressed = lz4_flex::compress_prepend_size(content);
         self.add_pre_compressed_bytes(hash, compressed)?;
         Ok(hash_hex)
     }
@@ -66,10 +65,10 @@ impl PackWriter {
         self.add_pre_compressed_bytes(hash, compressed)
     }
 
-    pub fn add_pre_compressed_bytes(&mut self, hash: [u8; 32], compressed: Vec<u8>) -> Result<()> {
+    pub fn add_pre_compressed_bytes(&mut self, hash: [u8; 16], compressed: Vec<u8>) -> Result<()> {
         let compressed_len = compressed.len() as u64;
 
-        // Write entry to BufWriter: hash(32) + compressed_len(8) + data(N)
+        // Write entry to BufWriter: hash(16) + compressed_len(8) + data(N)
         self.writer.write_all(&hash)?;
         self.writer.write_all(&compressed_len.to_le_bytes())?;
         self.writer.write_all(&compressed)?;
@@ -84,7 +83,7 @@ impl PackWriter {
             offset: self.offset,
             size: compressed_len,
         });
-        self.offset += 32 + 8 + compressed_len;
+        self.offset += 16 + 8 + compressed_len;
         Ok(())
     }
 
@@ -108,8 +107,7 @@ impl PackWriter {
         // Write real header
         let mut header = [0u8; HEADER_SIZE as usize];
         header[0..4].copy_from_slice(PACK_MAGIC);
-        header[4..8].copy_from_slice(&PACK_VERSION.to_le_bytes());
-        header[8..12].copy_from_slice(&count.to_le_bytes());
+        header[4..8].copy_from_slice(&count.to_le_bytes());
 
         dat_tmp.seek(SeekFrom::Start(0))?;
         dat_tmp.write_all(&header)?;
@@ -117,7 +115,7 @@ impl PackWriter {
 
         // Finalize hash: include header in the hash
         self.hasher.update(&header);
-        let pack_hash = self.hasher.finalize().to_hex()[..16].to_string();
+        let pack_hash = format!("{:032x}", self.hasher.digest128())[..16].to_string();
 
         // Persist .dat file
         let dat_path = self.packs_dir.join(format!("pack-{}.dat", pack_hash));
@@ -190,20 +188,20 @@ impl PackReader {
     /// Extract an IndexEntry from the mmap'd idx at a given index position.
     fn idx_entry(&self, index: usize) -> IndexEntry {
         let pos = index * IDX_ENTRY_SIZE;
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&self.idx[pos..pos + 32]);
-        let offset = u64::from_le_bytes(self.idx[pos + 32..pos + 40].try_into().unwrap());
-        let size = u64::from_le_bytes(self.idx[pos + 40..pos + 48].try_into().unwrap());
+        let mut hash = [0u8; 16];
+        hash.copy_from_slice(&self.idx[pos..pos + 16]);
+        let offset = u64::from_le_bytes(self.idx[pos + 16..pos + 24].try_into().unwrap());
+        let size = u64::from_le_bytes(self.idx[pos + 24..pos + 32].try_into().unwrap());
         IndexEntry { hash, offset, size }
     }
 
     /// Binary search for hash in the mmap'd index.
-    fn find_bytes(&self, hash_bytes: &[u8; 32]) -> Option<IndexEntry> {
+    fn find_bytes(&self, hash_bytes: &[u8; 16]) -> Option<IndexEntry> {
         let mut lo = 0usize;
         let mut hi = self.entry_count;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let mid_hash = &self.idx[mid * IDX_ENTRY_SIZE..mid * IDX_ENTRY_SIZE + 32];
+            let mid_hash = &self.idx[mid * IDX_ENTRY_SIZE..mid * IDX_ENTRY_SIZE + 16];
             match mid_hash.cmp(&hash_bytes[..]) {
                 std::cmp::Ordering::Equal => return Some(self.idx_entry(mid)),
                 std::cmp::Ordering::Less => lo = mid + 1,
@@ -218,12 +216,12 @@ impl PackReader {
         self.find_bytes(&hash_bytes)
     }
 
-    pub fn contains_bytes(&self, hash: &[u8; 32]) -> bool {
+    pub fn contains_bytes(&self, hash: &[u8; 16]) -> bool {
         self.find_bytes(hash).is_some()
     }
 
     fn compressed_bytes(&self, offset: u64, size: u64) -> Option<&[u8]> {
-        let data_start = (offset as usize).checked_add(32 + 8)?; // skip hash + compressed_size
+        let data_start = (offset as usize).checked_add(16 + 8)?; // skip hash + compressed_size
         let data_end = data_start.checked_add(size as usize)?;
         if data_end > self.dat.len() {
             return None;
@@ -235,7 +233,9 @@ impl PackReader {
         let compressed = self.compressed_bytes(offset, size).ok_or_else(|| {
             ChkpttError::StoreCorrupted("Pack entry points outside pack data".into())
         })?;
-        zstd::stream::copy_decode(Cursor::new(compressed), &mut writer)?;
+        let decompressed = lz4_flex::decompress_size_prepended(compressed)
+            .map_err(|e| ChkpttError::StoreCorrupted(format!("LZ4 decompression failed: {}", e)))?;
+        writer.write_all(&decompressed)?;
         Ok(())
     }
 
@@ -294,7 +294,7 @@ impl PackSet {
         Some(decompressed)
     }
 
-    pub fn contains_bytes(&self, hash: &[u8; 32]) -> bool {
+    pub fn contains_bytes(&self, hash: &[u8; 16]) -> bool {
         self.readers
             .iter()
             .any(|reader| reader.contains_bytes(hash))
@@ -318,7 +318,7 @@ impl PackSet {
             })
     }
 
-    pub fn locate_bytes(&self, hash: &[u8; 32]) -> Option<PackLocation> {
+    pub fn locate_bytes(&self, hash: &[u8; 16]) -> Option<PackLocation> {
         self.readers
             .iter()
             .enumerate()
@@ -334,7 +334,7 @@ impl PackSet {
     pub(crate) fn locate_in_pack_bytes(
         &self,
         pack_hash: &str,
-        hash: &[u8; 32],
+        hash: &[u8; 16],
     ) -> Option<PackLocation> {
         let reader_index = *self.reader_indices.get(pack_hash)?;
         let reader = self.readers.get(reader_index)?;
