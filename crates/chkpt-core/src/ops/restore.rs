@@ -564,22 +564,67 @@ pub fn restore(
         restore_total,
     )?;
 
-    // 8b. Remove files that are not in the target snapshot
-    for path in &files_to_remove {
-        let file_path = workspace_root.join(path);
-        match std::fs::remove_file(&file_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+    // 8b. Remove files that are not in the target snapshot (parallel)
+    {
+        let remove_worker_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(files_to_remove.len().max(1));
+        if remove_worker_count <= 1 {
+            for path in &files_to_remove {
+                let file_path = workspace_root.join(path);
+                match std::fs::remove_file(&file_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+                let completed = restore_progress.fetch_add(1, Ordering::Relaxed) + 1;
+                emit(
+                    &options.progress,
+                    ProgressEvent::RestoreFile {
+                        completed,
+                        total: restore_total,
+                    },
+                );
+            }
+        } else {
+            let chunk_size = files_to_remove.len().div_ceil(remove_worker_count);
+            let progress_ref = &restore_progress;
+            let progress_cb_ref = &options.progress;
+            std::thread::scope(|scope| -> Result<()> {
+                let workers: Vec<_> = files_to_remove
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || -> Result<()> {
+                            for path in chunk {
+                                let file_path = workspace_root.join(path);
+                                match std::fs::remove_file(&file_path) {
+                                    Ok(()) => {}
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(error) => return Err(error.into()),
+                                }
+                                let completed = progress_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                                emit(
+                                    progress_cb_ref,
+                                    ProgressEvent::RestoreFile {
+                                        completed,
+                                        total: restore_total,
+                                    },
+                                );
+                            }
+                            Ok(())
+                        })
+                    })
+                    .collect();
+
+                for worker in workers {
+                    worker.join().map_err(|_| {
+                        ChkpttError::Other("file removal worker thread panicked".into())
+                    })??;
+                }
+                Ok(())
+            })?;
         }
-        let completed = restore_progress.fetch_add(1, Ordering::Relaxed) + 1;
-        emit(
-            &options.progress,
-            ProgressEvent::RestoreFile {
-                completed,
-                total: restore_total,
-            },
-        );
     }
 
     // 8c. Clean up empty directories affected by removed files only.

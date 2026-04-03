@@ -249,3 +249,42 @@ fn test_restore_works_without_snapshot_or_tree_files() {
         "v1"
     );
 }
+
+#[test]
+fn test_restore_removes_many_files_correctly() {
+    let workspace = TempDir::new().unwrap();
+    for i in 0..5 {
+        fs::write(
+            workspace.path().join(format!("keep_{}.txt", i)),
+            format!("keep_{}", i),
+        )
+        .unwrap();
+    }
+    let snapshot = save(workspace.path(), SaveOptions::default()).unwrap();
+
+    fs::create_dir_all(workspace.path().join("extra")).unwrap();
+    for i in 0..200 {
+        fs::write(
+            workspace.path().join(format!("extra/file_{}.txt", i)),
+            format!("extra_{}", i),
+        )
+        .unwrap();
+    }
+
+    let result = restore(
+        workspace.path(),
+        &snapshot.snapshot_id,
+        RestoreOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(result.files_removed, 200);
+    assert_eq!(result.files_unchanged, 5);
+    assert!(!workspace.path().join("extra").exists());
+    for i in 0..5 {
+        assert_eq!(
+            fs::read_to_string(workspace.path().join(format!("keep_{}.txt", i))).unwrap(),
+            format!("keep_{}", i)
+        );
+    }
+}
