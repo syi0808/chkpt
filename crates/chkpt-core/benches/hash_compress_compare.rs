@@ -108,17 +108,19 @@ fn main() {
         }
         let bucket_bytes: u64 = bucket.iter().map(|s| s.size).sum();
 
+        // Pre-read all files into memory so timing reflects hash-only cost,
+        // not I/O, and both algorithms see equally warm buffers.
+        let bucket_contents: Vec<Vec<u8>> = bucket.iter().map(|s| read_file(s)).collect();
+
         let t = Instant::now();
-        let _: Vec<[u8; 32]> = parallel_map(bucket, threads, |s| {
-            let content = read_file(s);
-            *blake3::hash(&content).as_bytes()
+        let _: Vec<[u8; 32]> = parallel_map(&bucket_contents, threads, |content| {
+            *blake3::hash(content).as_bytes()
         });
         let blake3_ms = t.elapsed().as_millis();
 
         let t = Instant::now();
-        let _: Vec<u128> = parallel_map(bucket, threads, |s| {
-            let content = read_file(s);
-            xxhash_rust::xxh3::xxh3_128(&content)
+        let _: Vec<u128> = parallel_map(&bucket_contents, threads, |content| {
+            xxhash_rust::xxh3::xxh3_128(content)
         });
         let xxh3_ms = t.elapsed().as_millis();
 
@@ -246,6 +248,11 @@ fn main() {
         "=== Full Pipeline: read → hash → compress ({} threads) ===",
         threads
     );
+
+    // Warmup pass: read all files once so both pipelines start with a warm
+    // OS page cache and neither benefits from the other's reads.
+    let _warmup: Vec<Vec<u8>> = refs.iter().map(|s| read_file(s)).collect();
+    drop(_warmup);
 
     let t = Instant::now();
     let _: Vec<([u8; 32], Vec<u8>)> = parallel_map(&refs, threads, |s| {
