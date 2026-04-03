@@ -549,7 +549,10 @@ fn split_scanned_refs_preserving_hardlinks<'a>(
 }
 
 fn compress_with_worker_context(content: &[u8]) -> Vec<u8> {
-    lz4_flex::compress_prepend_size(content)
+    use lz4_flex::frame::FrameEncoder;
+    let mut encoder = FrameEncoder::new(Vec::new());
+    std::io::Write::write_all(&mut encoder, content).unwrap();
+    encoder.finish().unwrap()
 }
 
 /// Prepare files with a bounded producer/consumer pipeline so compressed blobs
@@ -839,7 +842,13 @@ mod tests {
         let content = b"compression-context-roundtrip-data";
 
         let compressed = compress_with_worker_context(content);
-        let decompressed = lz4_flex::decompress_size_prepended(&compressed).unwrap();
+        let decompressed = {
+            use lz4_flex::frame::FrameDecoder;
+            let mut decoder = FrameDecoder::new(&compressed[..]);
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut decoder, &mut buf).unwrap();
+            buf
+        };
 
         assert_eq!(decompressed, content);
     }

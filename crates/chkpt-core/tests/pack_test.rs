@@ -110,7 +110,12 @@ fn test_pack_write_with_precompressed_entries() {
 
     let content = b"streamed-content".to_vec();
     let hash = hash_content(&content);
-    let compressed = lz4_flex::compress_prepend_size(&content);
+    let compressed = {
+        use lz4_flex::frame::FrameEncoder;
+        let mut enc = FrameEncoder::new(Vec::new());
+        std::io::Write::write_all(&mut enc, &content).unwrap();
+        enc.finish().unwrap()
+    };
 
     let mut writer = PackWriter::new(&packs_dir).unwrap();
     writer.add_pre_compressed(hash.clone(), compressed).unwrap();

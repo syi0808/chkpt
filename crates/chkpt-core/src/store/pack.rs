@@ -55,7 +55,12 @@ impl PackWriter {
     pub fn add(&mut self, content: &[u8]) -> Result<String> {
         let hash_hex = hash_content(content);
         let hash = hex_to_bytes(&hash_hex)?;
-        let compressed = lz4_flex::compress_prepend_size(content);
+        let compressed = {
+            use lz4_flex::frame::FrameEncoder;
+            let mut encoder = FrameEncoder::new(Vec::new());
+            std::io::Write::write_all(&mut encoder, content).unwrap();
+            encoder.finish().unwrap()
+        };
         self.add_pre_compressed_bytes(hash, compressed)?;
         Ok(hash_hex)
     }
@@ -233,9 +238,9 @@ impl PackReader {
         let compressed = self.compressed_bytes(offset, size).ok_or_else(|| {
             ChkpttError::StoreCorrupted("Pack entry points outside pack data".into())
         })?;
-        let decompressed = lz4_flex::decompress_size_prepended(compressed)
+        let mut decoder = lz4_flex::frame::FrameDecoder::new(compressed);
+        std::io::copy(&mut decoder, &mut writer)
             .map_err(|e| ChkpttError::StoreCorrupted(format!("LZ4 decompression failed: {}", e)))?;
-        writer.write_all(&decompressed)?;
         Ok(())
     }
 
