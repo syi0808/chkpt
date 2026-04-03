@@ -4,7 +4,7 @@ use crate::index::FileIndex;
 use crate::ops::io_order::sort_scanned_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
-use crate::store::blob::hash_path_bytes;
+use crate::store::blob::{bytes_to_hex, hash_path_bytes};
 use crate::store::catalog::{ManifestEntry, MetadataCatalog};
 use crate::store::pack::{PackLocation, PackSet};
 use crate::store::tree::{EntryType, TreeStore};
@@ -57,11 +57,6 @@ struct RestoreTask {
     path: String,
     is_symlink: bool,
     source: RestoreSource,
-}
-
-/// Convert a [u8; 32] to a 64-char hex string.
-fn bytes_to_hex(bytes: &[u8; 32]) -> String {
-    blake3::Hash::from(*bytes).to_hex().to_string()
 }
 
 fn join_relative_path(prefix: &str, name: &str) -> String {
@@ -168,6 +163,25 @@ fn scan_current_state(
     Ok(state)
 }
 
+/// Pre-create all unique parent directories needed for restore tasks.
+fn precreate_restore_directories(
+    workspace_root: &Path,
+    restore_tasks: &[RestoreTask],
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::with_capacity(restore_tasks.len() / 4);
+    for task in restore_tasks {
+        if let Some(parent) = std::path::Path::new(&task.path).parent() {
+            if parent.as_os_str().is_empty() {
+                continue;
+            }
+            if seen.insert(parent.to_path_buf()) {
+                std::fs::create_dir_all(workspace_root.join(parent))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn restore_files(
     workspace_root: &Path,
     restore_tasks: &[RestoreTask],
@@ -179,6 +193,8 @@ fn restore_files(
     if restore_tasks.is_empty() {
         return Ok(Vec::new());
     }
+
+    precreate_restore_directories(workspace_root, restore_tasks)?;
 
     let worker_count = std::thread::available_parallelism()
         .map(|count| count.get())
@@ -238,9 +254,6 @@ fn restore_files(
 
 fn restore_file(workspace_root: &Path, task: &RestoreTask, pack_set: &PackSet) -> Result<()> {
     let file_path = workspace_root.join(&task.path);
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
 
     if let Ok(metadata) = std::fs::symlink_metadata(&file_path) {
         if metadata.file_type().is_symlink() || task.is_symlink {
