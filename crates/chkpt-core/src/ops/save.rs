@@ -4,9 +4,9 @@ use crate::index::{FileEntry, FileIndex};
 use crate::ops::io_order::sort_scanned_refs_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
-use crate::store::blob::{hex_to_bytes, read_path_bytes};
+use crate::store::blob::{hex_to_bytes, read_or_mmap, read_path_bytes};
 use crate::store::catalog::{BlobLocation, CatalogSnapshot, ManifestEntry, MetadataCatalog};
-use crate::store::pack::{PackSet, PackWriter};
+use crate::store::pack::PackWriter;
 use crate::store::snapshot::{Snapshot, SnapshotStats};
 use crate::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -40,7 +40,6 @@ struct ProcessedFile {
 
 struct PreparedFile {
     relative_path: String,
-    blob_hash_hex: String,
     blob_hash_bytes: [u8; 32],
     /// None if this hash was already seen (duplicate content — compression skipped)
     compressed: Option<Vec<u8>>,
@@ -65,7 +64,6 @@ struct HardlinkKey {
 
 #[derive(Debug, Clone)]
 struct HardlinkPrepared {
-    blob_hash_hex: String,
     blob_hash_bytes: [u8; 32],
 }
 
@@ -126,10 +124,7 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // 6. Create blob store
     let packs_dir = layout.packs_dir();
-    let has_pack_objects = store_has_pack_objects(&packs_dir)?;
-    let pack_set = has_pack_objects
-        .then(|| PackSet::open_all(&packs_dir))
-        .transpose()?;
+    let known_blob_hashes = catalog.all_blob_hashes()?;
     let mut pack_writer = PackWriter::new(&packs_dir)?;
 
     // 7. Process each scanned file: check index, hash, store blob
@@ -192,7 +187,6 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         |prepared| {
             let PreparedFile {
                 relative_path,
-                blob_hash_hex: _,
                 blob_hash_bytes,
                 compressed,
                 size,
@@ -205,10 +199,8 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
             total_bytes += size;
             if let Some(compressed) = compressed {
-                let exists_in_pack = pack_set
-                    .as_ref()
-                    .is_some_and(|ps| ps.contains_bytes(&blob_hash_bytes));
-                if !exists_in_pack {
+                let exists_in_store = known_blob_hashes.contains(&blob_hash_bytes);
+                if !exists_in_store {
                     pack_writer.add_pre_compressed_bytes(blob_hash_bytes, compressed)?;
                     new_blob_records.push(NewBlobRecord {
                         blob_hash: blob_hash_bytes,
@@ -441,27 +433,30 @@ fn prepare_file(
     seen_hashes: &ShardedSeenHashes,
     compressor: &mut zstd::bulk::Compressor<'_>,
 ) -> Result<PreparedFile> {
-    let content = read_path_bytes(&scanned.absolute_path, scanned.is_symlink)?;
-
-    // Hash (BLAKE3 is ~6 GB/s, negligible cost)
-    let hash = blake3::hash(&content);
-    let blob_hash_bytes: [u8; 32] = *hash.as_bytes();
-
-    // Only compress if this hash hasn't been seen yet (use raw bytes, no hex conversion)
-    let is_new = seen_hashes.insert(blob_hash_bytes);
-
-    let compressed = if is_new {
-        Some(compress_with_worker_context(&content, compressor)?)
+    let (blob_hash_bytes, compressed) = if scanned.is_symlink {
+        let content = read_path_bytes(&scanned.absolute_path, true)?;
+        let blob_hash_bytes = *blake3::hash(&content).as_bytes();
+        let is_new = seen_hashes.insert(blob_hash_bytes);
+        let compressed = if is_new {
+            Some(compress_with_worker_context(&content, compressor)?)
+        } else {
+            None
+        };
+        (blob_hash_bytes, compressed)
     } else {
-        None
+        let content = read_or_mmap(&scanned.absolute_path)?;
+        let blob_hash_bytes = *blake3::hash(content.as_ref()).as_bytes();
+        let is_new = seen_hashes.insert(blob_hash_bytes);
+        let compressed = if is_new {
+            Some(compress_with_worker_context(content.as_ref(), compressor)?)
+        } else {
+            None
+        };
+        (blob_hash_bytes, compressed)
     };
-
-    // Defer hex conversion to caller (only needed for pack writer)
-    let blob_hash_hex = hash.to_hex().to_string();
 
     Ok(PreparedFile {
         relative_path: scanned.relative_path.clone(),
-        blob_hash_hex,
         blob_hash_bytes,
         compressed,
         size: scanned.size,
@@ -498,7 +493,6 @@ fn prepare_file_with_hardlink_cache(
         if let Some(cached) = hardlinks.get(&key) {
             return Ok(PreparedFile {
                 relative_path: scanned.relative_path.clone(),
-                blob_hash_hex: cached.blob_hash_hex.clone(),
                 blob_hash_bytes: cached.blob_hash_bytes,
                 compressed: None,
                 size: scanned.size,
@@ -518,7 +512,6 @@ fn prepare_file_with_hardlink_cache(
         hardlinks.insert(
             key,
             HardlinkPrepared {
-                blob_hash_hex: prepared.blob_hash_hex.clone(),
                 blob_hash_bytes: prepared.blob_hash_bytes,
             },
         );
@@ -1003,7 +996,6 @@ mod tests {
         assert!(first.compressed.is_some());
         assert!(second.compressed.is_none());
         assert_eq!(first.blob_hash_bytes, second.blob_hash_bytes);
-        assert_eq!(first.blob_hash_hex, second.blob_hash_hex);
     }
 
     fn scanned(relative_path: &str, inode: Option<u64>) -> ScannedFile {
