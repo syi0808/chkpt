@@ -30,6 +30,8 @@ rustix = { workspace = true }
 libc = "0.2"
 lz4_flex = { workspace = true }
 xxhash-rust = { workspace = true }
+blake3 = "1"
+zstd = "0.13"
 
 [[bench]]
 name = "save_pipeline"
