@@ -93,6 +93,6 @@ fn test_hex_to_bytes_invalid_length() {
 
 #[test]
 fn test_hex_to_bytes_invalid_chars() {
-    let bad = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+    let bad = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
     assert!(hex_to_bytes(bad).is_err());
 }

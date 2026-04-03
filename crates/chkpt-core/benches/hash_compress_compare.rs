@@ -27,6 +27,9 @@ fn parallel_map<T: Send + Sync, R: Send>(
     threads: usize,
     f: impl Fn(&T) -> R + Sync,
 ) -> Vec<R> {
+    if items.is_empty() {
+        return Vec::new();
+    }
     let results: Arc<Mutex<Vec<(usize, R)>>> = Arc::new(Mutex::new(Vec::with_capacity(items.len())));
     let chunk_size = items.len().div_ceil(threads.max(1));
 

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 /// Convert a 32-char hex string to a [u8; 16] array.
 pub(crate) fn hex_to_bytes32(hex: &str) -> napi::Result<[u8; 16]> {
-    if hex.len() != 32 {
+    if hex.len() != 32 || !hex.is_ascii() {
         return Err(napi::Error::new(
             napi::Status::InvalidArg,
             format!("expected 32-char hex string, got {} chars", hex.len()),

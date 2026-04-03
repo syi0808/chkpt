@@ -239,8 +239,13 @@ impl PackReader {
             ChkpttError::StoreCorrupted("Pack entry points outside pack data".into())
         })?;
         let mut decoder = lz4_flex::frame::FrameDecoder::new(compressed);
-        std::io::copy(&mut decoder, &mut writer)
-            .map_err(|e| ChkpttError::StoreCorrupted(format!("LZ4 decompression failed: {}", e)))?;
+        std::io::copy(&mut decoder, &mut writer).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::InvalidData {
+                ChkpttError::StoreCorrupted(format!("LZ4 decompression failed: {}", e))
+            } else {
+                ChkpttError::Io(e)
+            }
+        })?;
         Ok(())
     }
 

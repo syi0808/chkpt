@@ -310,7 +310,12 @@ fn main() {
                 set.insert(hash_bytes)
             };
             if is_new {
-                let compressed = lz4_flex::compress_prepend_size(&content);
+                let compressed = {
+                    use lz4_flex::frame::FrameEncoder;
+                    let mut encoder = FrameEncoder::new(Vec::new());
+                    std::io::Write::write_all(&mut encoder, &content).unwrap();
+                    encoder.finish().unwrap()
+                };
                 let hash_hex = hash_bytes
                     .iter()
                     .map(|b| format!("{b:02x}"))

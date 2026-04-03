@@ -124,7 +124,10 @@ pub fn hex_to_bytes(hex: &str) -> Result<[u8; 16]> {
         )));
     }
     for i in 0..16 {
-        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+        let slice = hex
+            .get(i * 2..i * 2 + 2)
+            .ok_or_else(|| crate::error::ChkpttError::Other("Invalid hex: byte index out of bounds".into()))?;
+        bytes[i] = u8::from_str_radix(slice, 16)
             .map_err(|_| crate::error::ChkpttError::Other("Invalid hex".into()))?;
     }
     Ok(bytes)
