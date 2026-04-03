@@ -701,10 +701,7 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
             Some(pos) => &pf.relative_path[..pos],
             None => "",
         };
-        dir_files
-            .entry(parent.to_string())
-            .or_default()
-            .push(pf);
+        dir_files.entry(parent.to_string()).or_default().push(pf);
         register_directory_hierarchy(parent, &mut all_dirs, &mut child_dirs);
     }
 
