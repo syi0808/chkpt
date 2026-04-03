@@ -790,45 +790,6 @@ fn register_directory_hierarchy(
     }
 }
 
-/// Check if file extension indicates already-compressed content.
-fn should_skip_compression(path: &str) -> bool {
-    let ext = match path.rsplit_once('.') {
-        Some((_, ext)) => ext,
-        None => return false,
-    };
-    matches!(
-        ext,
-        "jpg"
-            | "jpeg"
-            | "png"
-            | "gif"
-            | "webp"
-            | "avif"
-            | "heic"
-            | "mp4"
-            | "mkv"
-            | "avi"
-            | "mov"
-            | "webm"
-            | "mp3"
-            | "flac"
-            | "ogg"
-            | "aac"
-            | "opus"
-            | "zip"
-            | "gz"
-            | "bz2"
-            | "xz"
-            | "zst"
-            | "lz4"
-            | "br"
-            | "7z"
-            | "rar"
-            | "woff2"
-            | "woff"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,20 +960,5 @@ mod tests {
             mode: metadata.mode(),
             is_symlink: metadata.file_type().is_symlink(),
         }
-    }
-
-    #[test]
-    fn test_should_skip_compression_by_extension() {
-        assert!(should_skip_compression("photo.jpg"));
-        assert!(should_skip_compression("archive.zip"));
-        assert!(should_skip_compression("image.png"));
-        assert!(should_skip_compression("video.mp4"));
-        assert!(should_skip_compression("data.gz"));
-        assert!(should_skip_compression("dir/nested/file.jpeg"));
-
-        assert!(!should_skip_compression("code.rs"));
-        assert!(!should_skip_compression("readme.md"));
-        assert!(!should_skip_compression("data.json"));
-        assert!(!should_skip_compression("no_extension"));
     }
 }
