@@ -124,6 +124,11 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // 6. Create blob store
     let packs_dir = layout.packs_dir();
+    // Load all known blob hashes from the catalog's blob_index table.
+    // This relies on blob_index being authoritative (kept in sync by
+    // bulk_upsert_blob_locations after each pack write). If the catalog
+    // and pack store ever diverge (e.g. manual .dat deletion), a store
+    // repair operation would be needed.
     let known_blob_hashes = catalog.all_blob_hashes()?;
     let mut pack_writer = PackWriter::new(&packs_dir)?;
 

@@ -57,6 +57,7 @@ pub fn hash_file_bytes(path: &Path) -> Result<[u8; 32]> {
     if let Ok(metadata) = std::fs::metadata(path) {
         if metadata.len() >= HASH_FILE_MMAP_THRESHOLD {
             if let Ok(file) = std::fs::File::open(path) {
+                // SAFETY: file is opened read-only and kept alive alongside the mmap.
                 if let Ok(mmap) = unsafe { Mmap::map(&file) } {
                     return Ok(*blake3::hash(&mmap).as_bytes());
                 }

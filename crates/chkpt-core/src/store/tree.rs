@@ -53,6 +53,7 @@ impl TreeStore {
             std::fs::File::open(&dat_path),
             std::fs::File::open(&idx_path),
         ) {
+            // SAFETY: files are opened read-only and kept alive alongside the mmaps.
             (Ok(dat_file), Ok(idx_file)) => match (unsafe { Mmap::map(&dat_file) }, unsafe {
                 Mmap::map(&idx_file)
             }) {
