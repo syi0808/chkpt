@@ -302,7 +302,6 @@ fn resolve_restore_sources(
     packs_dir: &Path,
 ) -> Result<(PackSet, HashMap<[u8; 32], RestoreSource>)> {
     let candidate_count = files_to_add.len() + files_to_change.len();
-    let mut sources = HashMap::with_capacity(candidate_count);
     let mut seen_hashes = HashSet::with_capacity(candidate_count);
     let mut packed_hashes = Vec::with_capacity(candidate_count);
 
@@ -317,11 +316,14 @@ fn resolve_restore_sources(
     }
 
     if packed_hashes.is_empty() {
-        return Ok((PackSet::empty(), sources));
+        return Ok((PackSet::empty(), HashMap::new()));
     }
 
     let blob_locations = catalog.blob_locations_for_hashes(&packed_hashes)?;
+
+    // Single pass: collect pack hashes and build per-blob location info
     let mut selected_pack_hashes = HashSet::with_capacity(packed_hashes.len());
+    let mut hash_to_pack: Vec<([u8; 32], String)> = Vec::with_capacity(packed_hashes.len());
     for hash in &packed_hashes {
         let location = blob_locations
             .get(hash)
@@ -333,19 +335,17 @@ fn resolve_restore_sources(
             ))
         })?;
         selected_pack_hashes.insert(pack_hash.clone());
+        hash_to_pack.push((*hash, pack_hash.clone()));
     }
 
-    let mut pack_hashes: Vec<_> = selected_pack_hashes.into_iter().collect();
-    pack_hashes.sort_unstable();
-    let pack_set = PackSet::open_selected(packs_dir, &pack_hashes)?;
+    let mut pack_hashes_vec: Vec<_> = selected_pack_hashes.into_iter().collect();
+    pack_hashes_vec.sort_unstable();
+    let pack_set = PackSet::open_selected(packs_dir, &pack_hashes_vec)?;
 
-    for hash in packed_hashes {
-        let pack_hash = blob_locations
-            .get(&hash)
-            .and_then(|location| location.pack_hash.as_ref())
-            .expect("pack hash missing after validation");
+    let mut sources = HashMap::with_capacity(hash_to_pack.len());
+    for (hash, pack_hash) in hash_to_pack {
         let location = pack_set
-            .locate_in_pack_bytes(pack_hash, &hash)
+            .locate_in_pack_bytes(&pack_hash, &hash)
             .ok_or_else(|| ChkpttError::ObjectNotFound(bytes_to_hex(&hash)))?;
         sources.insert(hash, RestoreSource::Packed(location));
     }
