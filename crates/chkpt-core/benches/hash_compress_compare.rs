@@ -251,8 +251,9 @@ fn main() {
 
     // Warmup pass: read all files once so both pipelines start with a warm
     // OS page cache and neither benefits from the other's reads.
-    let _warmup: Vec<Vec<u8>> = refs.iter().map(|s| read_file(s)).collect();
-    drop(_warmup);
+    refs.iter().for_each(|s| {
+        let _ = read_file(s);
+    });
 
     let t = Instant::now();
     let _: Vec<([u8; 32], Vec<u8>)> = parallel_map(&refs, threads, |s| {
