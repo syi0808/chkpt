@@ -6,10 +6,9 @@ use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 
-const TREE_PACK_MAGIC: &[u8; 4] = b"CKTR";
-const TREE_PACK_VERSION: u32 = 1;
-const TREE_IDX_ENTRY_SIZE: usize = 32 + 8 + 8; // hash(32) + offset(8) + size(8)
-const TREE_HEADER_SIZE: u64 = 12;
+const TREE_PACK_MAGIC: &[u8; 4] = b"CKTL";
+const TREE_IDX_ENTRY_SIZE: usize = 16 + 8 + 8; // hash(16) + offset(8) + size(8)
+const TREE_HEADER_SIZE: u64 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub enum EntryType {
@@ -22,7 +21,7 @@ pub enum EntryType {
 pub struct TreeEntry {
     pub name: String,
     pub entry_type: EntryType,
-    pub hash: [u8; 32],
+    pub hash: [u8; 16],
     pub size: u64,
     pub mode: u32,
 }
@@ -30,7 +29,7 @@ pub struct TreeEntry {
 /// Index entry for a tree in the pack.
 #[derive(Debug, Clone)]
 struct TreeIdxEntry {
-    hash: [u8; 32],
+    hash: [u8; 16],
     offset: u64,
     size: u64,
 }
@@ -96,7 +95,8 @@ impl TreeStore {
         let mut sorted = entries.to_vec();
         sorted.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         let encoded = bitcode::encode(&sorted);
-        let hash_hex = blake3::hash(&encoded).to_hex().to_string();
+        let hash_bytes = xxhash_rust::xxh3::xxh3_128(&encoded).to_le_bytes();
+        let hash_hex = crate::store::blob::bytes_to_hex(&hash_bytes);
         let path = self.tree_path(&hash_hex);
         let parent = path
             .parent()
@@ -128,16 +128,16 @@ impl TreeStore {
 
         // Collect existing idx entries
         let mut all_idx_entries: Vec<TreeIdxEntry> = Vec::new();
-        let mut existing_hashes: std::collections::HashSet<[u8; 32]> =
+        let mut existing_hashes: std::collections::HashSet<[u8; 16]> =
             std::collections::HashSet::new();
 
         let existing_dat_len = if let (Some(dat), Some(idx)) = (&self.pack_dat, &self.pack_idx) {
             for i in 0..self.pack_entry_count {
                 let pos = i * TREE_IDX_ENTRY_SIZE;
-                let mut hash = [0u8; 32];
-                hash.copy_from_slice(&idx[pos..pos + 32]);
-                let offset = u64::from_le_bytes(idx[pos + 32..pos + 40].try_into().unwrap());
-                let size = u64::from_le_bytes(idx[pos + 40..pos + 48].try_into().unwrap());
+                let mut hash = [0u8; 16];
+                hash.copy_from_slice(&idx[pos..pos + 16]);
+                let offset = u64::from_le_bytes(idx[pos + 16..pos + 24].try_into().unwrap());
+                let size = u64::from_le_bytes(idx[pos + 24..pos + 32].try_into().unwrap());
                 existing_hashes.insert(hash);
                 all_idx_entries.push(TreeIdxEntry { hash, offset, size });
             }
@@ -165,7 +165,7 @@ impl TreeStore {
                     continue;
                 }
                 let data_len = encoded.len() as u64;
-                // Write: hash(32) + size(8) + data(N)
+                // Write: hash(16) + size(8) + data(N)
                 writer.write_all(&hash)?;
                 writer.write_all(&data_len.to_le_bytes())?;
                 writer.write_all(encoded)?;
@@ -175,7 +175,7 @@ impl TreeStore {
                     offset,
                     size: data_len,
                 });
-                offset += 32 + 8 + data_len;
+                offset += 16 + 8 + data_len;
             }
 
             writer.flush()?;
@@ -185,7 +185,6 @@ impl TreeStore {
         let total_count = all_idx_entries.len() as u32;
         dat_tmp.seek(SeekFrom::Start(0))?;
         dat_tmp.write_all(TREE_PACK_MAGIC)?;
-        dat_tmp.write_all(&TREE_PACK_VERSION.to_le_bytes())?;
         dat_tmp.write_all(&total_count.to_le_bytes())?;
         dat_tmp.flush()?;
 
@@ -242,12 +241,12 @@ impl TreeStore {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let pos = mid * TREE_IDX_ENTRY_SIZE;
-            let mid_hash = &idx[pos..pos + 32];
+            let mid_hash = &idx[pos..pos + 16];
             match mid_hash.cmp(&hash_bytes) {
                 std::cmp::Ordering::Equal => {
-                    let offset = u64::from_le_bytes(idx[pos + 32..pos + 40].try_into().unwrap());
-                    let size = u64::from_le_bytes(idx[pos + 40..pos + 48].try_into().unwrap());
-                    let data_start = offset as usize + 32 + 8;
+                    let offset = u64::from_le_bytes(idx[pos + 16..pos + 24].try_into().unwrap());
+                    let size = u64::from_le_bytes(idx[pos + 24..pos + 32].try_into().unwrap());
+                    let data_start = offset as usize + 16 + 8;
                     let data_end = data_start + size as usize;
                     if data_end > dat.len() {
                         return None;
