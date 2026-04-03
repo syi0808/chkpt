@@ -157,7 +157,13 @@ impl MetadataCatalog {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=-64000;
+             PRAGMA temp_store=MEMORY;
+             PRAGMA mmap_size=268435456;",
+        )?;
         conn.execute_batch(CREATE_SCHEMA)?;
         ensure_manifest_snapshot_column(&conn)?;
         ensure_root_tree_hash_column(&conn)?;
@@ -480,6 +486,12 @@ impl MetadataCatalog {
         tx.commit()?;
         Ok(())
     }
+
+    /// Expose the inner connection for testing/diagnostics.
+    #[cfg(test)]
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
 }
 
 fn insert_snapshot_row_tx(
@@ -591,5 +603,27 @@ mod tests {
             })
         );
         assert!(!locations.contains_key(&hash_missing));
+    }
+
+    #[test]
+    fn test_catalog_pragmas_are_set() {
+        let dir = TempDir::new().unwrap();
+        let catalog = MetadataCatalog::open(dir.path().join("catalog.db")).unwrap();
+        let conn = catalog.connection();
+
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_lowercase(), "wal");
+
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1); // NORMAL = 1
+
+        let temp_store: i64 = conn
+            .query_row("PRAGMA temp_store", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(temp_store, 2); // MEMORY = 2
     }
 }
