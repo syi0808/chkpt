@@ -166,10 +166,13 @@ impl PackReader {
         let idx = unsafe { Mmap::map(&idx_file)? };
 
         // Hint kernel about expected access patterns.
-        // .dat is read sequentially during restore; .idx is binary-searched.
+        // .dat uses WillNeed (not Sequential) because parallel restore workers
+        // read different regions of the same mmap concurrently — Sequential
+        // causes aggressive page reclaim that hurts other threads.
+        // .idx is binary-searched so Random is appropriate.
         #[cfg(unix)]
         {
-            let _ = dat.advise(memmap2::Advice::Sequential);
+            let _ = dat.advise(memmap2::Advice::WillNeed);
             let _ = idx.advise(memmap2::Advice::Random);
         }
 
