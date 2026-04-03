@@ -697,13 +697,15 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
     all_dirs.insert(String::new()); // root always exists
 
     for pf in processed_files {
-        let parent = if let Some(pos) = pf.relative_path.rfind('/') {
-            pf.relative_path[..pos].to_string()
-        } else {
-            String::new()
+        let parent = match pf.relative_path.rfind('/') {
+            Some(pos) => &pf.relative_path[..pos],
+            None => "",
         };
-        dir_files.entry(parent.clone()).or_default().push(pf);
-        register_directory_hierarchy(&parent, &mut all_dirs, &mut child_dirs);
+        dir_files
+            .entry(parent.to_string())
+            .or_default()
+            .push(pf);
+        register_directory_hierarchy(parent, &mut all_dirs, &mut child_dirs);
     }
 
     // Sort directories bottom-up (deepest first)
@@ -737,13 +739,12 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
 
         if let Some(files) = dir_files.get(dir) {
             for pf in files {
-                let name = if let Some(pos) = pf.relative_path.rfind('/') {
-                    pf.relative_path[pos + 1..].to_string()
-                } else {
-                    pf.relative_path.clone()
+                let name = match pf.relative_path.rfind('/') {
+                    Some(pos) => &pf.relative_path[pos + 1..],
+                    None => &pf.relative_path,
                 };
                 entries.push(TreeEntry {
-                    name,
+                    name: name.to_string(),
                     entry_type: pf.entry_type,
                     hash: pf.blob_hash_bytes,
                     size: pf.size,
@@ -757,13 +758,12 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
                 let sub_hash = dir_hashes.get(sub_dir).ok_or_else(|| {
                     ChkpttError::Other(format!("Missing tree hash for directory '{}'", sub_dir))
                 })?;
-                let sub_name = if let Some(pos) = sub_dir.rfind('/') {
-                    sub_dir[pos + 1..].to_string()
-                } else {
-                    sub_dir.clone()
+                let sub_name = match sub_dir.rfind('/') {
+                    Some(pos) => &sub_dir[pos + 1..],
+                    None => sub_dir.as_str(),
                 };
                 entries.push(TreeEntry {
-                    name: sub_name,
+                    name: sub_name.to_string(),
                     entry_type: EntryType::Dir,
                     hash: hex_to_bytes(sub_hash)?,
                     size: 0,
@@ -802,22 +802,29 @@ fn register_directory_hierarchy(
         return;
     }
 
-    let mut parent = String::new();
-    let mut current = String::with_capacity(dir.len());
-    for segment in dir.split('/') {
-        if !current.is_empty() {
-            current.push('/');
-        }
-        current.push_str(segment);
+    // Fast path: if the full dir is already known, all ancestors are too
+    if all_dirs.contains(dir) {
+        return;
+    }
 
-        if all_dirs.insert(current.clone()) {
-            child_dirs
-                .entry(parent.clone())
-                .or_default()
-                .push(current.clone());
+    let mut segments_end = Vec::new();
+    for (i, ch) in dir.char_indices() {
+        if ch == '/' {
+            segments_end.push(i);
         }
-        parent.clear();
-        parent.push_str(&current);
+    }
+    segments_end.push(dir.len());
+
+    let mut parent = String::new();
+    for &end in &segments_end {
+        let current = &dir[..end];
+        if all_dirs.insert(current.to_string()) {
+            child_dirs
+                .entry(parent)
+                .or_default()
+                .push(current.to_string());
+        }
+        parent = current.to_string();
     }
 }
 
