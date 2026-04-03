@@ -1,14 +1,11 @@
 use crate::config::{project_id_from_path, StoreLayout};
 use crate::error::{ChkpttError, Result};
 use crate::ops::lock::ProjectLock;
+use crate::store::blob::bytes_to_hex;
 use crate::store::catalog::{CatalogSnapshot, MetadataCatalog};
 use crate::store::tree::{EntryType, TreeStore};
 use std::collections::HashSet;
 use std::path::Path;
-
-fn bytes_to_hex(bytes: &[u8; 32]) -> String {
-    blake3::Hash::from(*bytes).to_hex().to_string()
-}
 
 fn collect_reachable_blobs_from_tree(
     tree_store: &TreeStore,
