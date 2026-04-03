@@ -9,9 +9,9 @@ use std::path::Path;
 
 fn collect_reachable_blobs_from_tree(
     tree_store: &TreeStore,
-    tree_hash: &[u8; 32],
-    reachable_blobs: &mut HashSet<[u8; 32]>,
-    visited: &mut HashSet<[u8; 32]>,
+    tree_hash: &[u8; 16],
+    reachable_blobs: &mut HashSet<[u8; 16]>,
+    visited: &mut HashSet<[u8; 16]>,
 ) -> Result<()> {
     if !visited.insert(*tree_hash) {
         return Ok(());
@@ -39,9 +39,9 @@ fn collect_reachable_blobs(
     catalog: &MetadataCatalog,
     tree_store: &TreeStore,
     snapshots: &[CatalogSnapshot],
-) -> Result<Option<HashSet<[u8; 32]>>> {
+) -> Result<Option<HashSet<[u8; 16]>>> {
     let mut reachable = HashSet::new();
-    let mut visited: HashSet<[u8; 32]> = HashSet::new();
+    let mut visited: HashSet<[u8; 16]> = HashSet::new();
 
     for snapshot in snapshots {
         if snapshot.stats.total_files == 0 {

@@ -31,12 +31,12 @@ pub struct RestoreResult {
 }
 
 struct CurrentFileState {
-    hash: [u8; 32],
+    hash: [u8; 16],
     is_symlink: bool,
 }
 
 struct TargetFileState {
-    hash: [u8; 32],
+    hash: [u8; 16],
     is_symlink: bool,
 }
 
@@ -300,7 +300,7 @@ fn resolve_restore_sources(
     target_state: &BTreeMap<String, TargetFileState>,
     catalog: &MetadataCatalog,
     packs_dir: &Path,
-) -> Result<(PackSet, HashMap<[u8; 32], RestoreSource>)> {
+) -> Result<(PackSet, HashMap<[u8; 16], RestoreSource>)> {
     let candidate_count = files_to_add.len() + files_to_change.len();
     let mut seen_hashes = HashSet::with_capacity(candidate_count);
     let mut packed_hashes = Vec::with_capacity(candidate_count);
@@ -323,7 +323,7 @@ fn resolve_restore_sources(
 
     // Single pass: collect pack hashes and build per-blob location info
     let mut selected_pack_hashes = HashSet::with_capacity(packed_hashes.len());
-    let mut hash_to_pack: Vec<([u8; 32], String)> = Vec::with_capacity(packed_hashes.len());
+    let mut hash_to_pack: Vec<([u8; 16], String)> = Vec::with_capacity(packed_hashes.len());
     for hash in &packed_hashes {
         let location = blob_locations
             .get(hash)
@@ -357,7 +357,7 @@ fn build_restore_tasks(
     files_to_add: &[String],
     files_to_change: &[String],
     target_state: &BTreeMap<String, TargetFileState>,
-    restore_sources: &HashMap<[u8; 32], RestoreSource>,
+    restore_sources: &HashMap<[u8; 16], RestoreSource>,
 ) -> Result<Vec<RestoreTask>> {
     let mut tasks = Vec::with_capacity(files_to_add.len() + files_to_change.len());
 
@@ -686,7 +686,7 @@ fn restored_index_entries(
 fn cached_hash_bytes(
     file: &ScannedFile,
     cached_entries: &HashMap<String, crate::index::FileEntry>,
-) -> Option<[u8; 32]> {
+) -> Option<[u8; 16]> {
     let cached = cached_entries.get(&file.relative_path)?;
     if cached.mtime_secs == file.mtime_secs
         && cached.mtime_nanos == file.mtime_nanos
@@ -700,7 +700,7 @@ fn cached_hash_bytes(
     }
 }
 
-fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFile, [u8; 32])>> {
+fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFile, [u8; 16])>> {
     if scanned_files.is_empty() {
         return Ok(Vec::new());
     }
@@ -728,7 +728,7 @@ fn hash_scanned_files(scanned_files: Vec<ScannedFile>) -> Result<Vec<(ScannedFil
         let mut workers = Vec::with_capacity(scanned_files.len().div_ceil(chunk_size));
         for chunk in scanned_files.chunks(chunk_size) {
             workers.push(
-                scope.spawn(move || -> Result<Vec<(ScannedFile, [u8; 32])>> {
+                scope.spawn(move || -> Result<Vec<(ScannedFile, [u8; 16])>> {
                     chunk
                         .iter()
                         .map(|file| {
@@ -967,7 +967,7 @@ mod tests {
         assert_eq!(diff.files_to_change, vec!["link".to_string()]);
     }
 
-    fn hash_bytes(label: &str) -> [u8; 32] {
-        *blake3::hash(label.as_bytes()).as_bytes()
+    fn hash_bytes(label: &str) -> [u8; 16] {
+        xxhash_rust::xxh3::xxh3_128(label.as_bytes()).to_le_bytes()
     }
 }
