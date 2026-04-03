@@ -167,4 +167,4 @@ This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE
 
 ## Author
 
-**Yein Sung** — [GitHub](https://github.com/syi0808)
+**Yein Sung** · [GitHub](https://github.com/syi0808)
