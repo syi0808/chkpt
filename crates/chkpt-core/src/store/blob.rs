@@ -110,3 +110,24 @@ pub fn hash_path_bytes(path: &Path, is_symlink: bool) -> Result<[u8; 32]> {
 
     hash_file_bytes(path)
 }
+
+/// Convert a 64-char hex string to [u8; 32].
+pub fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {
+    let mut bytes = [0u8; 32];
+    if hex.len() != 64 {
+        return Err(crate::error::ChkpttError::Other(format!(
+            "Invalid hash length: {}",
+            hex.len()
+        )));
+    }
+    for i in 0..32 {
+        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .map_err(|_| crate::error::ChkpttError::Other("Invalid hex".into()))?;
+    }
+    Ok(bytes)
+}
+
+/// Convert [u8; 32] to a 64-char hex string.
+pub fn bytes_to_hex(bytes: &[u8; 32]) -> String {
+    blake3::Hash::from(*bytes).to_hex().to_string()
+}

@@ -1,4 +1,5 @@
 use chkpt_core::store::blob::hash_content;
+use chkpt_core::store::blob::hash_content_bytes;
 use chkpt_core::store::pack::{PackReader, PackSet, PackWriter};
 use tempfile::TempDir;
 
@@ -171,4 +172,25 @@ fn test_pack_mmap_reader_large_dataset() {
     // Verify non-existent hash returns None
     let fake_hash = "0".repeat(64);
     assert!(reader.try_read(&fake_hash).is_none());
+}
+
+#[test]
+fn test_pack_locate_bytes() {
+    let dir = TempDir::new().unwrap();
+    let packs_dir = dir.path().join("packs");
+    std::fs::create_dir_all(&packs_dir).unwrap();
+
+    let content = b"locate-bytes-test-data";
+    let hash_bytes = hash_content_bytes(content);
+
+    let mut writer = PackWriter::new(&packs_dir).unwrap();
+    writer.add(content).unwrap();
+    writer.finish().unwrap();
+
+    let pack_set = PackSet::open_all(&packs_dir).unwrap();
+    let location = pack_set.locate_bytes(&hash_bytes);
+    assert!(location.is_some());
+
+    let missing = [0u8; 32];
+    assert!(pack_set.locate_bytes(&missing).is_none());
 }

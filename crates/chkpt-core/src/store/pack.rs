@@ -1,5 +1,5 @@
 use crate::error::{ChkpttError, Result};
-use crate::store::blob::hash_content;
+use crate::store::blob::{hash_content, hex_to_bytes};
 use memmap2::Mmap;
 use std::collections::HashMap;
 use std::io::{BufWriter, Cursor, Seek, SeekFrom, Write};
@@ -307,6 +307,19 @@ impl PackSet {
             })
     }
 
+    pub fn locate_bytes(&self, hash: &[u8; 32]) -> Option<PackLocation> {
+        self.readers
+            .iter()
+            .enumerate()
+            .find_map(|(reader_index, reader)| {
+                reader.find_bytes(hash).map(|entry| PackLocation {
+                    reader_index,
+                    offset: entry.offset,
+                    size: entry.size,
+                })
+            })
+    }
+
     pub(crate) fn locate_in_pack_bytes(
         &self,
         pack_hash: &str,
@@ -358,19 +371,4 @@ pub fn list_packs(packs_dir: &Path) -> Result<Vec<String>> {
         }
     }
     Ok(packs)
-}
-
-fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {
-    let mut bytes = [0u8; 32];
-    if hex.len() != 64 {
-        return Err(ChkpttError::Other(format!(
-            "Invalid hash length: {}",
-            hex.len()
-        )));
-    }
-    for i in 0..32 {
-        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| ChkpttError::Other("Invalid hex".into()))?;
-    }
-    Ok(bytes)
 }

@@ -1,4 +1,5 @@
 use crate::error::{ChkpttError, Result};
+use crate::store::blob::hex_to_bytes;
 use bitcode::{Decode, Encode};
 use memmap2::Mmap;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -253,19 +254,4 @@ impl TreeStore {
         }
         None
     }
-}
-
-fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {
-    let mut bytes = [0u8; 32];
-    if hex.len() != 64 {
-        return Err(ChkpttError::Other(format!(
-            "Invalid hash length: {}",
-            hex.len()
-        )));
-    }
-    for i in 0..32 {
-        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| ChkpttError::Other("Invalid hex".into()))?;
-    }
-    Ok(bytes)
 }

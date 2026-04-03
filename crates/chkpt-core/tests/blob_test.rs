@@ -1,5 +1,6 @@
 use chkpt_core::store::blob::{
-    hash_content, hash_content_bytes, hash_path_bytes, read_or_mmap, read_path_bytes, FileContent,
+    bytes_to_hex, hash_content, hash_content_bytes, hash_path_bytes, hex_to_bytes, read_or_mmap,
+    read_path_bytes, FileContent,
 };
 use std::fs;
 use tempfile::TempDir;
@@ -72,4 +73,27 @@ fn test_read_or_mmap_empty_file_works() {
     let fc = read_or_mmap(&path).unwrap();
     assert!(matches!(fc, FileContent::Vec(_)));
     assert_eq!(fc.as_ref(), b"");
+}
+
+#[test]
+fn test_hex_to_bytes_roundtrip() {
+    let original = [
+        0xA3u8, 0xB2, 0xC1, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D, 0x7E, 0x8F,
+        0x90, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29, 0x3A, 0x4B, 0x5C, 0x6D, 0x7E,
+        0x8F, 0x90,
+    ];
+    let hex = bytes_to_hex(&original);
+    let decoded = hex_to_bytes(&hex).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_hex_to_bytes_invalid_length() {
+    assert!(hex_to_bytes("abc").is_err());
+}
+
+#[test]
+fn test_hex_to_bytes_invalid_chars() {
+    let bad = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+    assert!(hex_to_bytes(bad).is_err());
 }
