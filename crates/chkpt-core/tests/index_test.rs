@@ -144,3 +144,20 @@ fn test_index_persistence_across_opens() {
     assert_eq!(loaded.blob_hash, [42u8; 16]);
     assert_eq!(loaded.size, 999);
 }
+
+#[test]
+fn test_index_gracefully_handles_corrupt_or_legacy_format() {
+    // Simulate an index.bin written by an older version with an incompatible
+    // binary layout (e.g. 32-byte blob_hash instead of 16-byte).  The index
+    // is a pure performance cache so a decode failure must not propagate as
+    // an error — it should silently start with an empty index instead.
+    let dir = TempDir::new().unwrap();
+    let index_path = dir.path().join("index.bin");
+
+    // Write garbage / incompatible bytes that bitcode cannot decode into
+    // Vec<FileEntry>.
+    std::fs::write(&index_path, b"this is not valid bitcode data").unwrap();
+
+    let idx = FileIndex::open(&index_path).unwrap(); // must not panic/error
+    assert_eq!(idx.all_paths().unwrap().len(), 0);
+}
