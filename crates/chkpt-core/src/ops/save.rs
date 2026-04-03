@@ -4,7 +4,7 @@ use crate::index::{FileEntry, FileIndex};
 use crate::ops::io_order::sort_scanned_refs_for_locality;
 use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
-use crate::store::blob::read_path_bytes;
+use crate::store::blob::{hex_to_bytes, read_path_bytes};
 use crate::store::catalog::{BlobLocation, CatalogSnapshot, ManifestEntry, MetadataCatalog};
 use crate::store::pack::{PackSet, PackWriter};
 use crate::store::snapshot::{Snapshot, SnapshotStats};
@@ -27,22 +27,6 @@ pub struct SaveOptions {
 pub struct SaveResult {
     pub snapshot_id: String,
     pub stats: SnapshotStats,
-}
-
-/// Convert a 64-char hex string to a [u8; 32] array.
-fn hex_to_bytes(hex: &str) -> Result<[u8; 32]> {
-    let mut bytes = [0u8; 32];
-    if hex.len() != 64 {
-        return Err(ChkpttError::Other(format!(
-            "Invalid hash length: {}",
-            hex.len()
-        )));
-    }
-    for i in 0..32 {
-        bytes[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| ChkpttError::Other("Invalid hex".into()))?;
-    }
-    Ok(bytes)
 }
 
 /// Represents a file with its blob hash after processing.
@@ -830,6 +814,46 @@ fn register_directory_hierarchy(
     }
 }
 
+/// Check if file extension indicates already-compressed content.
+#[allow(dead_code)]
+fn should_skip_compression(path: &str) -> bool {
+    let ext = match path.rsplit_once('.') {
+        Some((_, ext)) => ext,
+        None => return false,
+    };
+    matches!(
+        ext,
+        "jpg"
+            | "jpeg"
+            | "png"
+            | "gif"
+            | "webp"
+            | "avif"
+            | "heic"
+            | "mp4"
+            | "mkv"
+            | "avi"
+            | "mov"
+            | "webm"
+            | "mp3"
+            | "flac"
+            | "ogg"
+            | "aac"
+            | "opus"
+            | "zip"
+            | "gz"
+            | "bz2"
+            | "xz"
+            | "zst"
+            | "lz4"
+            | "br"
+            | "7z"
+            | "rar"
+            | "woff2"
+            | "woff"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,5 +1036,20 @@ mod tests {
             mode: metadata.mode(),
             is_symlink: metadata.file_type().is_symlink(),
         }
+    }
+
+    #[test]
+    fn test_should_skip_compression_by_extension() {
+        assert!(should_skip_compression("photo.jpg"));
+        assert!(should_skip_compression("archive.zip"));
+        assert!(should_skip_compression("image.png"));
+        assert!(should_skip_compression("video.mp4"));
+        assert!(should_skip_compression("data.gz"));
+        assert!(should_skip_compression("dir/nested/file.jpeg"));
+
+        assert!(!should_skip_compression("code.rs"));
+        assert!(!should_skip_compression("readme.md"));
+        assert!(!should_skip_compression("data.json"));
+        assert!(!should_skip_compression("no_extension"));
     }
 }
