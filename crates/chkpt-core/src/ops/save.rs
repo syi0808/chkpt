@@ -32,7 +32,7 @@ pub struct SaveResult {
 /// Represents a file with its blob hash after processing.
 struct ProcessedFile {
     relative_path: String,
-    blob_hash_bytes: [u8; 32],
+    blob_hash_bytes: [u8; 16],
     size: u64,
     mode: u32,
     entry_type: EntryType,
@@ -40,7 +40,7 @@ struct ProcessedFile {
 
 struct PreparedFile {
     relative_path: String,
-    blob_hash_bytes: [u8; 32],
+    blob_hash_bytes: [u8; 16],
     /// None if this hash was already seen (duplicate content — compression skipped)
     compressed: Option<Vec<u8>>,
     size: u64,
@@ -52,7 +52,7 @@ struct PreparedFile {
 }
 
 struct NewBlobRecord {
-    blob_hash: [u8; 32],
+    blob_hash: [u8; 16],
     size: u64,
 }
 
@@ -64,13 +64,13 @@ struct HardlinkKey {
 
 #[derive(Debug, Clone)]
 struct HardlinkPrepared {
-    blob_hash_bytes: [u8; 32],
+    blob_hash_bytes: [u8; 16],
 }
 
 const SEEN_HASH_SHARDS: usize = 64;
 const PREPARED_FILE_PIPELINE_SLOTS: usize = 64;
 struct ShardedSeenHashes {
-    shards: Vec<Mutex<HashSet<[u8; 32]>>>,
+    shards: Vec<Mutex<HashSet<[u8; 16]>>>,
 }
 
 impl ShardedSeenHashes {
@@ -85,7 +85,7 @@ impl ShardedSeenHashes {
     }
 
     #[inline]
-    fn insert(&self, hash: [u8; 32]) -> bool {
+    fn insert(&self, hash: [u8; 16]) -> bool {
         let shard_index = ((hash[0] as usize) << 8 | hash[1] as usize) % self.shards.len();
         let mut shard = self.shards[shard_index].lock().unwrap();
         shard.insert(hash)
@@ -374,7 +374,7 @@ fn root_tree_hash_for_snapshot(
     catalog: &MetadataCatalog,
     snapshot: &CatalogSnapshot,
     tree_store: &TreeStore,
-) -> Result<[u8; 32]> {
+) -> Result<[u8; 16]> {
     if let Some(root_tree_hash) = snapshot.root_tree_hash {
         return Ok(root_tree_hash);
     }
@@ -433,31 +433,23 @@ fn cached_processed_file(
     None
 }
 
-fn prepare_file(
-    scanned: &ScannedFile,
-    seen_hashes: &ShardedSeenHashes,
-    compressor: &mut zstd::bulk::Compressor<'_>,
-) -> Result<PreparedFile> {
+fn prepare_file(scanned: &ScannedFile, seen_hashes: &ShardedSeenHashes) -> Result<PreparedFile> {
     let (blob_hash_bytes, compressed) = if scanned.is_symlink {
         let content = read_path_bytes(&scanned.absolute_path, true)?;
-        let blob_hash_bytes = *blake3::hash(&content).as_bytes();
+        let blob_hash_bytes = xxhash_rust::xxh3::xxh3_128(&content).to_le_bytes();
         let is_new = seen_hashes.insert(blob_hash_bytes);
         let compressed = if is_new {
-            Some(compress_with_worker_context(&content, compressor, false)?)
+            Some(compress_with_worker_context(&content))
         } else {
             None
         };
         (blob_hash_bytes, compressed)
     } else {
         let content = read_or_mmap(&scanned.absolute_path)?;
-        let blob_hash_bytes = *blake3::hash(content.as_ref()).as_bytes();
+        let blob_hash_bytes = xxhash_rust::xxh3::xxh3_128(content.as_ref()).to_le_bytes();
         let is_new = seen_hashes.insert(blob_hash_bytes);
         let compressed = if is_new {
-            Some(compress_with_worker_context(
-                content.as_ref(),
-                compressor,
-                should_skip_compression(&scanned.relative_path),
-            )?)
+            Some(compress_with_worker_context(content.as_ref()))
         } else {
             None
         };
@@ -495,7 +487,6 @@ fn hardlink_key(scanned: &ScannedFile) -> Option<HardlinkKey> {
 fn prepare_file_with_hardlink_cache(
     scanned: &ScannedFile,
     seen_hashes: &ShardedSeenHashes,
-    compressor: &mut zstd::bulk::Compressor<'_>,
     hardlinks: &mut HashMap<HardlinkKey, HardlinkPrepared>,
 ) -> Result<PreparedFile> {
     if let Some(key) = hardlink_key(scanned) {
@@ -517,7 +508,7 @@ fn prepare_file_with_hardlink_cache(
             });
         }
 
-        let prepared = prepare_file(scanned, seen_hashes, compressor)?;
+        let prepared = prepare_file(scanned, seen_hashes)?;
         hardlinks.insert(
             key,
             HardlinkPrepared {
@@ -527,7 +518,7 @@ fn prepare_file_with_hardlink_cache(
         return Ok(prepared);
     }
 
-    prepare_file(scanned, seen_hashes, compressor)
+    prepare_file(scanned, seen_hashes)
 }
 
 fn split_scanned_refs_preserving_hardlinks<'a>(
@@ -557,16 +548,8 @@ fn split_scanned_refs_preserving_hardlinks<'a>(
     chunks
 }
 
-fn compress_with_worker_context(
-    content: &[u8],
-    compressor: &mut zstd::bulk::Compressor<'_>,
-    skip_compression: bool,
-) -> Result<Vec<u8>> {
-    if skip_compression {
-        // zstd level 0 creates a valid zstd frame storing data verbatim
-        return Ok(zstd::encode_all(content, 0)?);
-    }
-    Ok(compressor.compress(content)?)
+fn compress_with_worker_context(content: &[u8]) -> Vec<u8> {
+    lz4_flex::compress_prepend_size(content)
 }
 
 /// Prepare files with a bounded producer/consumer pipeline so compressed blobs
@@ -592,15 +575,9 @@ where
         .min(scanned_files.len());
 
     if worker_count <= 1 {
-        let mut compressor = zstd::bulk::Compressor::new(1)?;
         let mut hardlinks = HashMap::new();
         for scanned in scanned_files {
-            let prepared = prepare_file_with_hardlink_cache(
-                scanned,
-                seen_hashes,
-                &mut compressor,
-                &mut hardlinks,
-            )?;
+            let prepared = prepare_file_with_hardlink_cache(scanned, seen_hashes, &mut hardlinks)?;
             let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
             emit(
                 progress,
@@ -626,22 +603,11 @@ where
             .map(|chunk| {
                 let sender = sender.clone();
                 scope.spawn(move || {
-                    let mut compressor = match zstd::bulk::Compressor::new(1) {
-                        Ok(compressor) => compressor,
-                        Err(error) => {
-                            let _ = sender.send(Err(error.into()));
-                            return;
-                        }
-                    };
                     let mut hardlinks = HashMap::new();
 
                     for scanned in chunk {
-                        let result = prepare_file_with_hardlink_cache(
-                            scanned,
-                            seen_hashes,
-                            &mut compressor,
-                            &mut hardlinks,
-                        );
+                        let result =
+                            prepare_file_with_hardlink_cache(scanned, seen_hashes, &mut hardlinks);
                         let completed = progress_counter.fetch_add(1, Ordering::Relaxed) + 1;
                         emit(
                             progress,
@@ -724,7 +690,7 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
     // Phase 1: Compute all tree hashes and encoded data in memory
     let mut dir_hashes: BTreeMap<String, String> = BTreeMap::new();
     let mut pack_entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(dir_list.len());
-    let mut known_hashes: HashSet<[u8; 32]> = HashSet::with_capacity(dir_list.len());
+    let mut known_hashes: HashSet<[u8; 16]> = HashSet::with_capacity(dir_list.len());
 
     for dir in &dir_list {
         let file_count = dir_files.get(dir).map(|files| files.len()).unwrap_or(0);
@@ -771,9 +737,8 @@ fn build_tree(processed_files: &[ProcessedFile], tree_store: &TreeStore) -> Resu
 
         entries.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         let encoded = bitcode::encode(&entries);
-        let hash = blake3::hash(&encoded);
-        let hash_bytes = *hash.as_bytes();
-        let hash_hex = hash.to_hex().to_string();
+        let hash_bytes = xxhash_rust::xxh3::xxh3_128(&encoded).to_le_bytes();
+        let hash_hex = crate::store::blob::bytes_to_hex(&hash_bytes);
 
         dir_hashes.insert(dir.clone(), hash_hex.clone());
         if known_hashes.insert(hash_bytes) {
@@ -874,11 +839,11 @@ mod tests {
 
     #[test]
     fn test_hex_to_bytes() {
-        let hex = "a3b2c1d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let hex = "a3b2c1d4e5f60718293a4b5c6d7e8f90";
         let bytes = hex_to_bytes(hex).unwrap();
         assert_eq!(bytes[0], 0xa3);
         assert_eq!(bytes[1], 0xb2);
-        assert_eq!(bytes[31], 0x90);
+        assert_eq!(bytes[15], 0x90);
     }
 
     #[test]
@@ -911,10 +876,9 @@ mod tests {
     #[test]
     fn test_compress_with_worker_context_roundtrip() {
         let content = b"compression-context-roundtrip-data";
-        let mut compressor = zstd::bulk::Compressor::new(1).unwrap();
 
-        let compressed = compress_with_worker_context(content, &mut compressor, false).unwrap();
-        let decompressed = zstd::decode_all(&compressed[..]).unwrap();
+        let compressed = compress_with_worker_context(content);
+        let decompressed = lz4_flex::decompress_size_prepended(&compressed).unwrap();
 
         assert_eq!(decompressed, content);
     }
@@ -922,7 +886,7 @@ mod tests {
     #[test]
     fn test_sharded_seen_hashes_dedups_single_thread() {
         let seen = ShardedSeenHashes::new(8);
-        let hash = [7u8; 32];
+        let hash = [7u8; 16];
 
         assert!(seen.insert(hash));
         assert!(!seen.insert(hash));
@@ -932,7 +896,7 @@ mod tests {
     fn test_sharded_seen_hashes_dedups_multi_thread() {
         let seen = Arc::new(ShardedSeenHashes::new(1024));
         let unique_inserts = Arc::new(AtomicUsize::new(0));
-        let duplicate_hash = [9u8; 32];
+        let duplicate_hash = [9u8; 16];
 
         std::thread::scope(|scope| {
             for i in 0..8u8 {
@@ -942,7 +906,7 @@ mod tests {
                     if seen.insert(duplicate_hash) {
                         unique_inserts.fetch_add(1, Ordering::Relaxed);
                     }
-                    let mut unique_hash = [0u8; 32];
+                    let mut unique_hash = [0u8; 16];
                     unique_hash[0] = i;
                     if seen.insert(unique_hash) {
                         unique_inserts.fetch_add(1, Ordering::Relaxed);
@@ -992,23 +956,13 @@ mod tests {
         let original_scanned = scanned_from_path("original.txt", &original);
         let alias_scanned = scanned_from_path("alias.txt", &alias);
         let seen_hashes = ShardedSeenHashes::new(2);
-        let mut compressor = zstd::bulk::Compressor::new(1).unwrap();
         let mut hardlinks = HashMap::new();
 
-        let first = prepare_file_with_hardlink_cache(
-            &original_scanned,
-            &seen_hashes,
-            &mut compressor,
-            &mut hardlinks,
-        )
-        .unwrap();
-        let second = prepare_file_with_hardlink_cache(
-            &alias_scanned,
-            &seen_hashes,
-            &mut compressor,
-            &mut hardlinks,
-        )
-        .unwrap();
+        let first =
+            prepare_file_with_hardlink_cache(&original_scanned, &seen_hashes, &mut hardlinks)
+                .unwrap();
+        let second =
+            prepare_file_with_hardlink_cache(&alias_scanned, &seen_hashes, &mut hardlinks).unwrap();
 
         assert!(first.compressed.is_some());
         assert!(second.compressed.is_none());
