@@ -9,14 +9,14 @@ fn test_tree_roundtrip() {
         TreeEntry {
             name: "bar.txt".into(),
             entry_type: EntryType::File,
-            hash: [1u8; 32],
+            hash: [1u8; 16],
             size: 100,
             mode: 0o644,
         },
         TreeEntry {
             name: "foo.txt".into(),
             entry_type: EntryType::File,
-            hash: [2u8; 32],
+            hash: [2u8; 16],
             size: 200,
             mode: 0o644,
         },
@@ -34,7 +34,7 @@ fn test_tree_hash_deterministic() {
     let entries = vec![TreeEntry {
         name: "a.txt".into(),
         entry_type: EntryType::File,
-        hash: [0u8; 32],
+        hash: [0u8; 16],
         size: 10,
         mode: 0o644,
     }];
@@ -51,14 +51,14 @@ fn test_tree_sorts_entries() {
         TreeEntry {
             name: "z".into(),
             entry_type: EntryType::File,
-            hash: [0u8; 32],
+            hash: [0u8; 16],
             size: 0,
             mode: 0o644,
         },
         TreeEntry {
             name: "a".into(),
             entry_type: EntryType::File,
-            hash: [1u8; 32],
+            hash: [1u8; 16],
             size: 0,
             mode: 0o644,
         },
@@ -77,14 +77,14 @@ fn test_tree_with_dir_entry() {
         TreeEntry {
             name: "src".into(),
             entry_type: EntryType::Dir,
-            hash: [5u8; 32],
+            hash: [5u8; 16],
             size: 0,
             mode: 0o755,
         },
         TreeEntry {
             name: "README.md".into(),
             entry_type: EntryType::File,
-            hash: [6u8; 32],
+            hash: [6u8; 16],
             size: 50,
             mode: 0o644,
         },

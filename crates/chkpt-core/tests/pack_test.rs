@@ -58,7 +58,7 @@ fn test_pack_not_found_returns_none() {
     let pack_hash = writer.finish().unwrap();
 
     let reader = PackReader::open(&packs_dir, &pack_hash).unwrap();
-    let result = reader.try_read(&"0".repeat(64));
+    let result = reader.try_read(&"0".repeat(32));
     assert!(result.is_none());
 }
 
@@ -110,7 +110,7 @@ fn test_pack_write_with_precompressed_entries() {
 
     let content = b"streamed-content".to_vec();
     let hash = hash_content(&content);
-    let compressed = zstd::encode_all(&content[..], 3).unwrap();
+    let compressed = lz4_flex::compress_prepend_size(&content);
 
     let mut writer = PackWriter::new(&packs_dir).unwrap();
     writer.add_pre_compressed(hash.clone(), compressed).unwrap();
@@ -170,7 +170,7 @@ fn test_pack_mmap_reader_large_dataset() {
     }
 
     // Verify non-existent hash returns None
-    let fake_hash = "0".repeat(64);
+    let fake_hash = "0".repeat(32);
     assert!(reader.try_read(&fake_hash).is_none());
 }
 
@@ -191,6 +191,6 @@ fn test_pack_locate_bytes() {
     let location = pack_set.locate_bytes(&hash_bytes);
     assert!(location.is_some());
 
-    let missing = [0u8; 32];
+    let missing = [0u8; 16];
     assert!(pack_set.locate_bytes(&missing).is_none());
 }

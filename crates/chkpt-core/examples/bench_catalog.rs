@@ -226,7 +226,7 @@ fn build_manifest(entry_count: usize, blob_count: usize) -> Vec<ManifestEntry> {
     manifest
 }
 
-fn build_blob_locations(blob_count: usize) -> Vec<([u8; 32], BlobLocation)> {
+fn build_blob_locations(blob_count: usize) -> Vec<([u8; 16], BlobLocation)> {
     let mut blobs = Vec::with_capacity(blob_count);
     for index in 0..blob_count {
         let pack_hash = if index % 5 == 0 {
@@ -275,8 +275,8 @@ fn manifest_path(index: usize) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn hash_bytes(index: usize) -> [u8; 32] {
-    let mut hash = [0u8; 32];
+fn hash_bytes(index: usize) -> [u8; 16] {
+    let mut hash = [0u8; 16];
     let ib = index.to_le_bytes();
     for (offset, byte) in hash.iter_mut().enumerate() {
         *byte = ib[offset % ib.len()]

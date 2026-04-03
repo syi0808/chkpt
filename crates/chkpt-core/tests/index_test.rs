@@ -4,7 +4,7 @@ use tempfile::TempDir;
 fn make_entry(path: &str, hash_byte: u8, size: u64) -> FileEntry {
     FileEntry {
         path: path.to_string(),
-        blob_hash: [hash_byte; 32],
+        blob_hash: [hash_byte; 16],
         size,
         mtime_secs: 1000 + size as i64,
         mtime_nanos: 0,
@@ -28,7 +28,7 @@ fn test_index_insert_and_get() {
     idx.upsert(&entry).unwrap();
     let loaded = idx.get("src/main.rs").unwrap().unwrap();
     assert_eq!(loaded.size, 100);
-    assert_eq!(loaded.blob_hash, [1u8; 32]);
+    assert_eq!(loaded.blob_hash, [1u8; 16]);
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn test_index_upsert_updates() {
     idx.upsert(&make_entry("a.txt", 1, 20)).unwrap();
     let loaded = idx.get("a.txt").unwrap().unwrap();
     assert_eq!(loaded.size, 20);
-    assert_eq!(loaded.blob_hash, [1u8; 32]);
+    assert_eq!(loaded.blob_hash, [1u8; 16]);
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn test_index_entries_by_path() {
         .unwrap();
     let entries = idx.entries_by_path().unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries["a.txt"].blob_hash, [1u8; 32]);
+    assert_eq!(entries["a.txt"].blob_hash, [1u8; 16]);
     assert_eq!(entries["b.txt"].size, 2);
 }
 
@@ -112,7 +112,7 @@ fn test_index_apply_changes_updates_and_removes_in_one_call() {
         &[String::from("remove.txt")],
         &[FileEntry {
             path: "keep.txt".into(),
-            blob_hash: [3u8; 32],
+            blob_hash: [3u8; 16],
             size: 3,
             mtime_secs: 3,
             mtime_nanos: 0,
@@ -124,7 +124,7 @@ fn test_index_apply_changes_updates_and_removes_in_one_call() {
 
     let entries = idx.entries_by_path().unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries["keep.txt"].blob_hash, [3u8; 32]);
+    assert_eq!(entries["keep.txt"].blob_hash, [3u8; 16]);
     assert_eq!(entries["keep.txt"].mode, 0o755);
     assert!(!entries.contains_key("remove.txt"));
 }
@@ -141,6 +141,6 @@ fn test_index_persistence_across_opens() {
 
     let idx2 = FileIndex::open(&index_path).unwrap();
     let loaded = idx2.get("persist.txt").unwrap().unwrap();
-    assert_eq!(loaded.blob_hash, [42u8; 32]);
+    assert_eq!(loaded.blob_hash, [42u8; 16]);
     assert_eq!(loaded.size, 999);
 }

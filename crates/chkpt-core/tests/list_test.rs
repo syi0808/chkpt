@@ -4,7 +4,7 @@ use chkpt_core::ops::save::{save, SaveOptions};
 use std::fs;
 use tempfile::TempDir;
 
-fn root_tree_hash(bytes: &[u8; 32]) -> String {
+fn root_tree_hash(bytes: &[u8; 16]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -52,5 +52,5 @@ fn test_list_reads_from_catalog_without_snapshot_files() {
     let result = list(workspace.path(), None).unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].id, saved.snapshot_id);
-    assert_ne!(root_tree_hash(&result[0].root_tree_hash), "0".repeat(64));
+    assert_ne!(root_tree_hash(&result[0].root_tree_hash), "0".repeat(32));
 }
