@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct FileEntry {
     pub path: String,
-    pub blob_hash: [u8; 32],
+    pub blob_hash: [u8; 16],
     pub size: u64,
     pub mtime_secs: i64,
     pub mtime_nanos: i64,

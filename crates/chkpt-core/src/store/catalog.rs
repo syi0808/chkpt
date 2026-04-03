@@ -50,14 +50,14 @@ pub struct CatalogSnapshot {
     pub message: Option<String>,
     pub parent_snapshot_id: Option<String>,
     pub manifest_snapshot_id: Option<String>,
-    pub root_tree_hash: Option<[u8; 32]>,
+    pub root_tree_hash: Option<[u8; 16]>,
     pub stats: SnapshotStats,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestEntry {
     pub path: String,
-    pub blob_hash: [u8; 32],
+    pub blob_hash: [u8; 16],
     pub size: u64,
     pub mode: u32,
 }
@@ -82,14 +82,14 @@ fn row_to_snapshot(row: &Row<'_>) -> rusqlite::Result<CatalogSnapshot> {
     let root_tree_hash = row
         .get::<_, Option<Vec<u8>>>(5)?
         .map(|bytes| {
-            if bytes.len() != 32 {
+            if bytes.len() != 16 {
                 return Err(rusqlite::Error::FromSqlConversionFailure(
                     5,
                     rusqlite::types::Type::Blob,
-                    format!("expected 32-byte root tree hash, got {}", bytes.len()).into(),
+                    format!("expected 16-byte root tree hash, got {}", bytes.len()).into(),
                 ));
             }
-            let mut hash = [0u8; 32];
+            let mut hash = [0u8; 16];
             hash.copy_from_slice(&bytes);
             Ok(hash)
         })
@@ -111,14 +111,14 @@ fn row_to_snapshot(row: &Row<'_>) -> rusqlite::Result<CatalogSnapshot> {
 
 fn row_to_manifest_entry(row: &Row<'_>) -> rusqlite::Result<ManifestEntry> {
     let blob_hash: Vec<u8> = row.get(1)?;
-    if blob_hash.len() != 32 {
+    if blob_hash.len() != 16 {
         return Err(rusqlite::Error::FromSqlConversionFailure(
             1,
             rusqlite::types::Type::Blob,
-            format!("expected 32-byte blob hash, got {}", blob_hash.len()).into(),
+            format!("expected 16-byte blob hash, got {}", blob_hash.len()).into(),
         ));
     }
-    let mut hash = [0u8; 32];
+    let mut hash = [0u8; 16];
     hash.copy_from_slice(&blob_hash);
     Ok(ManifestEntry {
         path: row.get(0)?,
@@ -131,15 +131,15 @@ fn row_to_manifest_entry(row: &Row<'_>) -> rusqlite::Result<ManifestEntry> {
 fn row_to_blob_location(
     hash: Vec<u8>,
     row: &Row<'_>,
-) -> rusqlite::Result<([u8; 32], BlobLocation)> {
-    if hash.len() != 32 {
+) -> rusqlite::Result<([u8; 16], BlobLocation)> {
+    if hash.len() != 16 {
         return Err(rusqlite::Error::FromSqlConversionFailure(
             0,
             rusqlite::types::Type::Blob,
-            format!("expected 32-byte blob hash, got {}", hash.len()).into(),
+            format!("expected 16-byte blob hash, got {}", hash.len()).into(),
         ));
     }
-    let mut blob_hash = [0u8; 32];
+    let mut blob_hash = [0u8; 16];
     blob_hash.copy_from_slice(&hash);
     Ok((
         blob_hash,
@@ -356,7 +356,7 @@ impl MetadataCatalog {
         Ok(())
     }
 
-    pub fn bulk_upsert_blob_locations(&self, entries: &[([u8; 32], BlobLocation)]) -> Result<()> {
+    pub fn bulk_upsert_blob_locations(&self, entries: &[([u8; 16], BlobLocation)]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -381,7 +381,7 @@ impl MetadataCatalog {
         Ok(())
     }
 
-    pub fn blob_location(&self, blob_hash: &[u8; 32]) -> Result<Option<BlobLocation>> {
+    pub fn blob_location(&self, blob_hash: &[u8; 16]) -> Result<Option<BlobLocation>> {
         let mut stmt = self
             .conn
             .prepare("SELECT pack_hash, size FROM blob_index WHERE blob_hash = ?1")?;
@@ -397,8 +397,8 @@ impl MetadataCatalog {
 
     pub fn blob_locations_for_hashes(
         &self,
-        blob_hashes: &[[u8; 32]],
-    ) -> Result<HashMap<[u8; 32], BlobLocation>> {
+        blob_hashes: &[[u8; 16]],
+    ) -> Result<HashMap<[u8; 16], BlobLocation>> {
         const SQLITE_MAX_VARS: usize = 512;
 
         if blob_hashes.is_empty() {
@@ -430,19 +430,19 @@ impl MetadataCatalog {
         Ok(locations)
     }
 
-    pub fn all_blob_hashes(&self) -> Result<HashSet<[u8; 32]>> {
+    pub fn all_blob_hashes(&self) -> Result<HashSet<[u8; 16]>> {
         let mut stmt = self.conn.prepare("SELECT blob_hash FROM blob_index")?;
         let hashes = stmt
             .query_map([], |row: &Row<'_>| {
                 let hash: Vec<u8> = row.get(0)?;
-                if hash.len() != 32 {
+                if hash.len() != 16 {
                     return Err(rusqlite::Error::FromSqlConversionFailure(
                         0,
                         rusqlite::types::Type::Blob,
-                        format!("expected 32-byte blob hash, got {}", hash.len()).into(),
+                        format!("expected 16-byte blob hash, got {}", hash.len()).into(),
                     ));
                 }
-                let mut blob_hash = [0u8; 32];
+                let mut blob_hash = [0u8; 16];
                 blob_hash.copy_from_slice(&hash);
                 Ok(blob_hash)
             })?
@@ -450,7 +450,7 @@ impl MetadataCatalog {
         Ok(hashes)
     }
 
-    pub fn delete_blob_location(&self, blob_hash: &[u8; 32]) -> Result<()> {
+    pub fn delete_blob_location(&self, blob_hash: &[u8; 16]) -> Result<()> {
         self.conn.execute(
             "DELETE FROM blob_index WHERE blob_hash = ?1",
             params![blob_hash.as_slice()],
@@ -561,9 +561,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let catalog = MetadataCatalog::open(dir.path().join("catalog.db")).unwrap();
 
-        let hash_a = *blake3::hash(b"a").as_bytes();
-        let hash_b = *blake3::hash(b"b").as_bytes();
-        let hash_missing = *blake3::hash(b"missing").as_bytes();
+        let hash_a = xxhash_rust::xxh3::xxh3_128(b"a").to_le_bytes();
+        let hash_b = xxhash_rust::xxh3::xxh3_128(b"b").to_le_bytes();
+        let hash_missing = xxhash_rust::xxh3::xxh3_128(b"missing").to_le_bytes();
 
         catalog
             .bulk_upsert_blob_locations(&[
