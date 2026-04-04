@@ -20,14 +20,15 @@ chkpt is a fast, content-addressable checkpoint system. One `chkpt save` before 
 
 Benchmarked on MacBook Pro (Apple M2 Pro, 16 GB RAM, APFS SSD). Release build, median of 3 runs.
 
-| Project | Files | Size | Cold Save | Incr. Save | Restore | Storage | Ratio |
-|---------|------:|-----:|----------:|-----------:|--------:|--------:|------:|
-| [React](https://github.com/facebook/react) | 6,879 | 34.4 MB | 0.26s | 0.05s | 0.03s | 19.5 MB | 1.7x |
-| [Rust](https://github.com/rust-lang/rust) | 58,760 | 195.9 MB | 2.04s | 0.33s | 0.18s | 96.0 MB | 2.0x |
-| [Linux kernel](https://github.com/torvalds/linux) | 92,923 | 1.4 GB | 2.95s | 0.47s | 0.24s | 503.3 MB | 2.9x |
+| Project | Files | Size | Cold Save | Incr. Save | Restore | Storage | Ratio | Incr. Storage (new data) |
+|---------|------:|-----:|----------:|-----------:|--------:|--------:|------:|------------------------:|
+| [React](https://github.com/facebook/react) | 6,879 | 34.4 MB | 0.26s | 0.05s | 0.03s | 19.5 MB | 1.7x | +2.5 MB (7.4 KB) |
+| [Rust](https://github.com/rust-lang/rust) | 58,760 | 195.9 MB | 2.04s | 0.33s | 0.18s | 96.0 MB | 2.0x | +15.8 MB (2.2 KB) |
+| [Linux kernel](https://github.com/torvalds/linux) | 92,923 | 1.4 GB | 2.95s | 0.47s | 0.24s | 503.3 MB | 2.9x | +22.9 MB (25 KB) |
 
 > **Cold Save** = first checkpoint with empty store. **Incr. Save** = re-save after modifying 5 files.
 > **Storage** = total `.chkpt` store size after cold save (LZ4-compressed, content-deduplicated). **Ratio** = original size / storage size.
+> **Incr. Storage** = total store growth per incremental save (includes metadata). Parenthesized value = actual new file content stored.
 
 ## Getting Started
 
