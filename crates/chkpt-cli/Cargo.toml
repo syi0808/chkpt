@@ -1,6 +1,6 @@
 [package]
 name = "chkpt-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "CLI for chkpt – a fast, content-addressable checkpoint system"
 license = "Apache-2.0"
@@ -10,12 +10,29 @@ name = "chkpt"
 path = "src/main.rs"
 
 [dependencies]
-chkpt-core = { version = "0.2.0", path = "../chkpt-core" }
-clap = { workspace = true }
-tokio = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-dialoguer = { workspace = true }
-chrono = { workspace = true }
 indicatif = "0.17"
+
+[dependencies.chkpt-core]
+version = "0.3.0"
+path = "../chkpt-core"
+
+[dependencies.clap]
+workspace = true
+
+[dependencies.tokio]
+workspace = true
+
+[dependencies.anyhow]
+workspace = true
+
+[dependencies.tracing]
+workspace = true
+
+[dependencies.tracing-subscriber]
+workspace = true
+
+[dependencies.dialoguer]
+workspace = true
+
+[dependencies.chrono]
+workspace = true

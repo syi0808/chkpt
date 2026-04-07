@@ -1,37 +1,77 @@
 [package]
 name = "chkpt-core"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Core library for chkpt – a fast, content-addressable checkpoint system"
 license = "Apache-2.0"
 
-[dependencies]
-xxhash-rust = { workspace = true }
-lz4_flex = { workspace = true }
-rusqlite = { workspace = true }
-tokio = { workspace = true }
-chrono = { workspace = true }
-dirs = { workspace = true }
-uuid = { workspace = true }
-tar = { workspace = true }
-fs4 = { workspace = true }
-tempfile = { workspace = true }
-ignore = { workspace = true }
-thiserror = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-bitcode = { workspace = true }
-memmap2 = { workspace = true }
+[dependencies.xxhash-rust]
+workspace = true
+
+[dependencies.lz4_flex]
+workspace = true
+
+[dependencies.rusqlite]
+workspace = true
+
+[dependencies.tokio]
+workspace = true
+
+[dependencies.chrono]
+workspace = true
+
+[dependencies.dirs]
+workspace = true
+
+[dependencies.uuid]
+workspace = true
+
+[dependencies.tar]
+workspace = true
+
+[dependencies.fs4]
+workspace = true
+
+[dependencies.tempfile]
+workspace = true
+
+[dependencies.ignore]
+workspace = true
+
+[dependencies.thiserror]
+workspace = true
+
+[dependencies.anyhow]
+workspace = true
+
+[dependencies.tracing]
+workspace = true
+
+[dependencies.bitcode]
+workspace = true
+
+[dependencies.memmap2]
+workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true }
-tempfile = { workspace = true }
-rustix = { workspace = true }
 libc = "0.2"
-lz4_flex = { workspace = true }
-xxhash-rust = { workspace = true }
 blake3 = "1"
 zstd = "0.13"
+
+[dev-dependencies.tokio]
+workspace = true
+
+[dev-dependencies.tempfile]
+workspace = true
+
+[dev-dependencies.rustix]
+workspace = true
+
+[dev-dependencies.lz4_flex]
+workspace = true
+
+[dev-dependencies.xxhash-rust]
+workspace = true
 
 [[bench]]
 name = "save_pipeline"
