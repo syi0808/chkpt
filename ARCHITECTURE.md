@@ -873,11 +873,8 @@ pub struct StoreLayout {
 | `index_path()` | `{base}/index.bin` | Active |
 | `locks_dir()` | `{base}/locks/` | Active |
 | `tree_path(hash)` | `{base}/trees/{2-char}/{62-char}` | Active |
-| `snapshots_dir()` | `{base}/snapshots/` | Legacy (unused by live path) |
-| `attachments_deps_dir()` | `{base}/attachments/deps/` | Legacy (unused by live path) |
-| `attachments_git_dir()` | `{base}/attachments/git/` | Legacy (unused by live path) |
 
-`ensure_dirs()` creates all directories. On macOS, also creates `.metadata_never_index` in the base directory to suppress Spotlight indexing.
+`ensure_dirs()` creates the base, trees, packs, and locks directories. On macOS, also creates `.metadata_never_index` in the base directory to suppress Spotlight indexing.
 
 ### Project ID
 
@@ -987,10 +984,7 @@ For a project at `/home/user/myproject`:
 │   │   └── 2b3c4d5e6f...
 │   └── b2/
 │       └── ...
-├── snapshots/                            (Legacy, unused by live path)
-└── attachments/                          (Legacy, unused by live path)
-    ├── deps/
-    └── git/
+└── .metadata_never_index                 macOS Spotlight exclusion marker
 ```
 
 ---

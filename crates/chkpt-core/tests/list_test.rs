@@ -41,13 +41,13 @@ fn test_list_with_limit() {
 }
 
 #[test]
-fn test_list_reads_from_catalog_without_snapshot_files() {
+fn test_list_reads_from_catalog_without_legacy_snapshot_dir() {
     let workspace = TempDir::new().unwrap();
     fs::write(workspace.path().join("a.txt"), "data").unwrap();
     let saved = save(workspace.path(), SaveOptions::default()).unwrap();
 
     let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
-    fs::remove_dir_all(layout.snapshots_dir()).unwrap();
+    assert!(!layout.base_dir().join("snapshots").exists());
 
     let result = list(workspace.path(), None).unwrap();
     assert_eq!(result.len(), 1);

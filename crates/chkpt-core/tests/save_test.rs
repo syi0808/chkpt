@@ -68,6 +68,18 @@ fn test_save_basic() {
 }
 
 #[test]
+fn test_save_does_not_create_legacy_store_dirs() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("hello.txt"), "hello").unwrap();
+
+    save(workspace.path(), SaveOptions::default()).unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    assert!(!layout.base_dir().join("snapshots").exists());
+    assert!(!layout.base_dir().join("attachments").exists());
+}
+
+#[test]
 fn test_save_incremental_dedup() {
     let workspace = TempDir::new().unwrap();
     fs::write(workspace.path().join("a.txt"), "content").unwrap();

@@ -6,7 +6,7 @@ use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
 use crate::store::blob::{hex_to_bytes, read_or_mmap, read_path_bytes};
 use crate::store::catalog::{BlobLocation, CatalogSnapshot, ManifestEntry, MetadataCatalog};
-use crate::store::pack::{list_packs, PackFinishOptions, PackWriter};
+use crate::store::pack::{PackFinishOptions, PackWriter};
 use crate::store::snapshot::{Snapshot, SnapshotStats};
 use crate::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -342,16 +342,6 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
 
     // 14. Return SaveResult
     Ok(SaveResult { snapshot_id, stats })
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn store_has_external_objects(objects_dir: &Path, packs_dir: &Path) -> Result<bool> {
-    let _ = objects_dir;
-    Ok(store_has_pack_objects(packs_dir)?)
-}
-
-fn store_has_pack_objects(packs_dir: &Path) -> Result<bool> {
-    Ok(!list_packs(packs_dir)?.is_empty())
 }
 
 fn root_tree_hash_for_snapshot(
@@ -797,28 +787,6 @@ mod tests {
     #[test]
     fn test_hex_to_bytes_invalid_length() {
         assert!(hex_to_bytes("abc").is_err());
-    }
-
-    #[test]
-    fn test_store_has_external_objects_false_for_empty_store() {
-        let dir = TempDir::new().unwrap();
-        let objects_dir = dir.path().join("objects");
-        let packs_dir = dir.path().join("packs");
-        std::fs::create_dir_all(&objects_dir).unwrap();
-        std::fs::create_dir_all(&packs_dir).unwrap();
-
-        assert!(!store_has_external_objects(&objects_dir, &packs_dir).unwrap());
-    }
-
-    #[test]
-    fn test_store_has_external_objects_true_for_pack_objects() {
-        let dir = TempDir::new().unwrap();
-        let objects_dir = dir.path().join("objects");
-        let packs_dir = dir.path().join("packs");
-        std::fs::create_dir_all(&packs_dir).unwrap();
-        std::fs::write(packs_dir.join("pack-demo.dat"), b"pack").unwrap();
-
-        assert!(store_has_external_objects(&objects_dir, &packs_dir).unwrap());
     }
 
     #[test]

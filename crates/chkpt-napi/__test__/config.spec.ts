@@ -21,11 +21,8 @@ describe("config", () => {
     const layout = getStoreLayout(dir);
     expect(layout.root).toContain(".chkpt/stores/");
     expect(layout.treesDir).toContain("trees");
-    expect(layout.snapshotsDir).toContain("snapshots");
     expect(layout.indexPath).toContain("index.bin");
     expect(layout.locksDir).toContain("locks");
-    expect(layout.attachmentsDepsDir).toContain("deps");
-    expect(layout.attachmentsGitDir).toContain("git");
     expect(layout.packsDir).toContain("packs");
   });
 });

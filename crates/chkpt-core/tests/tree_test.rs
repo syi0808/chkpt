@@ -1,6 +1,11 @@
 use chkpt_core::store::tree::{EntryType, TreeEntry, TreeStore};
 use tempfile::TempDir;
 
+fn loose_tree_path(dir: &TempDir, hash: &str) -> std::path::PathBuf {
+    let (prefix, rest) = hash.split_at(2);
+    dir.path().join(prefix).join(rest)
+}
+
 #[test]
 fn test_tree_roundtrip() {
     let dir = TempDir::new().unwrap();
@@ -22,6 +27,10 @@ fn test_tree_roundtrip() {
         },
     ];
     let hash = store.write(&entries).unwrap();
+    assert!(dir.path().join("trees.dat").exists());
+    assert!(dir.path().join("trees.idx").exists());
+    assert!(!loose_tree_path(&dir, &hash).exists());
+
     let read_back = store.read(&hash).unwrap();
     assert_eq!(read_back.len(), 2);
     assert_eq!(read_back[0].name, "bar.txt"); // sorted

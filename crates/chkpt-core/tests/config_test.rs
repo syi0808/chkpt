@@ -23,7 +23,6 @@ fn test_store_layout_paths() {
     let base = layout.base_dir();
     assert!(base.ends_with("abcdef1234567890"));
     assert!(layout.catalog_path().ends_with("catalog.sqlite"));
-    assert!(layout.snapshots_dir().ends_with("snapshots"));
     assert!(layout.trees_dir().ends_with("trees"));
     assert!(layout.packs_dir().ends_with("packs"));
     assert!(layout.locks_dir().ends_with("locks"));

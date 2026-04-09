@@ -84,34 +84,15 @@ impl TreeStore {
         }
     }
 
-    fn tree_path(&self, hash_hex: &str) -> PathBuf {
-        let (prefix, rest) = hash_hex.split_at(2);
-        self.base_dir.join(prefix).join(rest)
-    }
-
     /// Write tree entries (sorted by name). Returns hash hex.
-    /// Used for single-tree writes (tests, small operations).
     pub fn write(&self, entries: &[TreeEntry]) -> Result<String> {
         let mut sorted = entries.to_vec();
         sorted.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         let encoded = bitcode::encode(&sorted);
         let hash_bytes = xxhash_rust::xxh3::xxh3_128(&encoded).to_le_bytes();
         let hash_hex = crate::store::blob::bytes_to_hex(&hash_bytes);
-        let path = self.tree_path(&hash_hex);
-        let parent = path
-            .parent()
-            .ok_or_else(|| ChkpttError::Other("Tree path missing parent directory".into()))?;
-        std::fs::create_dir_all(parent)?;
-
-        let mut tmp = NamedTempFile::new_in(parent)?;
-        tmp.write_all(&encoded)?;
-        tmp.flush()?;
-
-        match tmp.persist_noclobber(&path) {
-            Ok(_) => Ok(hash_hex),
-            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(hash_hex),
-            Err(error) => Err(error.error.into()),
-        }
+        self.write_pack(&[(hash_hex.clone(), encoded)])?;
+        Ok(hash_hex)
     }
 
     /// Write a batch of pre-computed trees to a pack file.
@@ -208,36 +189,44 @@ impl TreeStore {
         Ok(())
     }
 
-    /// Read tree entries by hash. Checks pack first, then loose files.
+    /// Read tree entries by hash from the tree pack.
     pub fn read(&self, hash_hex: &str) -> Result<Vec<TreeEntry>> {
-        // Check pack first
-        if let Some(data) = self.read_from_pack(hash_hex) {
+        if let Some(data) = self
+            .read_from_pack(hash_hex)
+            .or_else(|| self.read_from_current_pack_files(hash_hex))
+        {
             let entries: Vec<TreeEntry> = bitcode::decode(&data)?;
             return Ok(entries);
         }
 
-        // Fall back to loose file
-        let path = self.tree_path(hash_hex);
-        let data = match std::fs::read(&path) {
-            Ok(data) => data,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ChkpttError::ObjectNotFound(hash_hex.to_string()));
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let entries: Vec<TreeEntry> = bitcode::decode(&data)?;
-        Ok(entries)
+        Err(ChkpttError::ObjectNotFound(hash_hex.to_string()))
     }
 
     /// Read raw data from the tree pack by hash.
     fn read_from_pack(&self, hash_hex: &str) -> Option<Vec<u8>> {
         let idx = self.pack_idx.as_ref()?;
         let dat = self.pack_dat.as_ref()?;
+        Self::read_from_pack_bytes(hash_hex, dat, idx, self.pack_entry_count)
+    }
+
+    fn read_from_current_pack_files(&self, hash_hex: &str) -> Option<Vec<u8>> {
+        let dat = std::fs::read(self.base_dir.join("trees.dat")).ok()?;
+        let idx = std::fs::read(self.base_dir.join("trees.idx")).ok()?;
+        let entry_count = idx.len() / TREE_IDX_ENTRY_SIZE;
+        Self::read_from_pack_bytes(hash_hex, &dat, &idx, entry_count)
+    }
+
+    fn read_from_pack_bytes(
+        hash_hex: &str,
+        dat: &[u8],
+        idx: &[u8],
+        entry_count: usize,
+    ) -> Option<Vec<u8>> {
         let hash_bytes = hex_to_bytes(hash_hex).ok()?;
 
         // Binary search in idx
         let mut lo = 0usize;
-        let mut hi = self.pack_entry_count;
+        let mut hi = entry_count;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let pos = mid * TREE_IDX_ENTRY_SIZE;

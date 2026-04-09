@@ -5,12 +5,9 @@ use std::path::Path;
 pub struct JsStoreLayout {
     pub root: String,
     pub trees_dir: String,
-    pub snapshots_dir: String,
     pub packs_dir: String,
     pub index_path: String,
     pub locks_dir: String,
-    pub attachments_deps_dir: String,
-    pub attachments_git_dir: String,
 }
 
 #[napi]
@@ -27,11 +24,8 @@ pub fn get_store_layout(workspace_path: String) -> JsStoreLayout {
     JsStoreLayout {
         root: layout.base_dir().to_string_lossy().to_string(),
         trees_dir: layout.trees_dir().to_string_lossy().to_string(),
-        snapshots_dir: layout.snapshots_dir().to_string_lossy().to_string(),
         packs_dir: layout.packs_dir().to_string_lossy().to_string(),
         index_path: layout.index_path().to_string_lossy().to_string(),
         locks_dir: layout.locks_dir().to_string_lossy().to_string(),
-        attachments_deps_dir: layout.attachments_deps_dir().to_string_lossy().to_string(),
-        attachments_git_dir: layout.attachments_git_dir().to_string_lossy().to_string(),
     }
 }

@@ -34,10 +34,6 @@ impl StoreLayout {
         &self.base
     }
 
-    pub fn snapshots_dir(&self) -> PathBuf {
-        self.base.join("snapshots")
-    }
-
     pub fn catalog_path(&self) -> PathBuf {
         self.base.join("catalog.sqlite")
     }
@@ -58,30 +54,13 @@ impl StoreLayout {
         self.base.join("locks")
     }
 
-    pub fn attachments_deps_dir(&self) -> PathBuf {
-        self.base.join("attachments").join("deps")
-    }
-
-    pub fn attachments_git_dir(&self) -> PathBuf {
-        self.base.join("attachments").join("git")
-    }
-
-    /// Tree path with 2-char prefix: trees/a3/rest_of_hash
-    pub fn tree_path(&self, hash_hex: &str) -> PathBuf {
-        let (prefix, rest) = hash_hex.split_at(2);
-        self.base.join("trees").join(prefix).join(rest)
-    }
-
     /// Create all required directories.
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         for dir in [
             self.base.clone(),
-            self.snapshots_dir(),
             self.trees_dir(),
             self.packs_dir(),
             self.locks_dir(),
-            self.attachments_deps_dir(),
-            self.attachments_git_dir(),
         ] {
             std::fs::create_dir_all(dir)?;
         }

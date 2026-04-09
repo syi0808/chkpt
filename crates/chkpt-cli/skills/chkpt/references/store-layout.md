@@ -11,9 +11,7 @@ chkpt stores data under `~/.chkpt/` by default. Set the `CHKPT_HOME` env var to 
 ├── locks/
 │   └── project.lock
 ├── trees/                  content-addressed tree nodes
-├── packs/                  packed blobs and indexes
-├── snapshots/              reserved compatibility directory
-└── attachments/            reserved compatibility directory
+└── packs/                  packed blobs and indexes
 ```
 
 The live save/restore/delete/list path is driven by `catalog.sqlite`. chkpt no longer stores snapshot JSON files or `config.json`.

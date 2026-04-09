@@ -77,13 +77,13 @@ fn test_delete_nonexistent() {
 }
 
 #[test]
-fn test_delete_works_without_snapshot_or_tree_files() {
+fn test_delete_works_without_tree_files() {
     let workspace = TempDir::new().unwrap();
     fs::write(workspace.path().join("a.txt"), "v1").unwrap();
     let snapshot = save(workspace.path(), SaveOptions::default()).unwrap();
 
     let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
-    fs::remove_dir_all(layout.snapshots_dir()).unwrap();
+    assert!(!layout.base_dir().join("snapshots").exists());
     fs::remove_dir_all(layout.trees_dir()).unwrap();
 
     delete(workspace.path(), &snapshot.snapshot_id).unwrap();
