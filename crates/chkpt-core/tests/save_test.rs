@@ -227,3 +227,53 @@ fn test_save_creates_index_db() {
     let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
     assert!(layout.index_path().exists());
 }
+
+#[test]
+fn test_save_with_pack_chunking_restores_from_parts() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("a.txt"), "alpha").unwrap();
+    let large_content: Vec<u8> = (0..4096)
+        .map(|index| ((index * 17 + index / 5) % 253) as u8)
+        .collect();
+    fs::write(workspace.path().join("large.bin"), &large_content).unwrap();
+
+    let result = save(
+        workspace.path(),
+        SaveOptions {
+            pack_chunk_bytes: Some(64),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    let pack_hashes = list_packs(&layout.packs_dir()).unwrap();
+    assert_eq!(pack_hashes.len(), 1);
+    let pack_hash = &pack_hashes[0];
+    assert!(!layout
+        .packs_dir()
+        .join(format!("pack-{}.dat", pack_hash))
+        .exists());
+    assert!(layout
+        .packs_dir()
+        .join(format!("pack-{}.dat.parts.json", pack_hash))
+        .exists());
+
+    fs::remove_file(workspace.path().join("a.txt")).unwrap();
+    fs::remove_file(workspace.path().join("large.bin")).unwrap();
+    chkpt_core::ops::restore::restore(
+        workspace.path(),
+        &result.snapshot_id,
+        chkpt_core::ops::restore::RestoreOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("a.txt")).unwrap(),
+        "alpha"
+    );
+    assert_eq!(
+        fs::read(workspace.path().join("large.bin")).unwrap(),
+        large_content
+    );
+}

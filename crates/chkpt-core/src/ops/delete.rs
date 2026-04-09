@@ -3,6 +3,7 @@ use crate::error::{ChkpttError, Result};
 use crate::ops::lock::ProjectLock;
 use crate::store::blob::bytes_to_hex;
 use crate::store::catalog::{CatalogSnapshot, MetadataCatalog};
+use crate::store::pack::remove_pack_files;
 use crate::store::tree::{EntryType, TreeStore};
 use std::collections::HashSet;
 use std::path::Path;
@@ -107,18 +108,7 @@ pub fn delete(workspace_root: &Path, snapshot_id: &str) -> Result<()> {
 
     for pack_hash in touched_packs {
         if catalog.pack_reference_count(&pack_hash)? == 0 {
-            let dat_path = layout.packs_dir().join(format!("pack-{}.dat", pack_hash));
-            let idx_path = layout.packs_dir().join(format!("pack-{}.idx", pack_hash));
-            match std::fs::remove_file(dat_path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-            match std::fs::remove_file(idx_path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
+            remove_pack_files(&layout.packs_dir(), &pack_hash)?;
         }
     }
 

@@ -14,6 +14,12 @@ workspace = true
 [dependencies.rusqlite]
 workspace = true
 
+[dependencies.serde]
+workspace = true
+
+[dependencies.serde_json]
+workspace = true
+
 [dependencies.tokio]
 workspace = true
 

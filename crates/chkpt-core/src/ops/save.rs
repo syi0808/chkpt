@@ -6,7 +6,7 @@ use crate::ops::lock::ProjectLock;
 use crate::scanner::ScannedFile;
 use crate::store::blob::{hex_to_bytes, read_or_mmap, read_path_bytes};
 use crate::store::catalog::{BlobLocation, CatalogSnapshot, ManifestEntry, MetadataCatalog};
-use crate::store::pack::PackWriter;
+use crate::store::pack::{list_packs, PackFinishOptions, PackWriter};
 use crate::store::snapshot::{Snapshot, SnapshotStats};
 use crate::store::tree::{EntryType, TreeEntry, TreeStore};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -20,6 +20,7 @@ use crate::ops::progress::{emit, ProgressCallback, ProgressEvent};
 pub struct SaveOptions {
     pub message: Option<String>,
     pub include_deps: bool,
+    pub pack_chunk_bytes: Option<u64>,
     pub progress: ProgressCallback,
 }
 
@@ -235,7 +236,9 @@ pub fn save(workspace_root: &Path, options: SaveOptions) -> Result<SaveResult> {
         },
     )?;
     let new_pack_hash = if !pack_writer.is_empty() {
-        Some(pack_writer.finish()?)
+        Some(pack_writer.finish_with_options(PackFinishOptions {
+            chunk_bytes: options.pack_chunk_bytes,
+        })?)
     } else {
         None
     };
@@ -348,26 +351,7 @@ fn store_has_external_objects(objects_dir: &Path, packs_dir: &Path) -> Result<bo
 }
 
 fn store_has_pack_objects(packs_dir: &Path) -> Result<bool> {
-    let entries = match std::fs::read_dir(packs_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with("pack-") && name.ends_with(".dat") {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+    Ok(!list_packs(packs_dir)?.is_empty())
 }
 
 fn root_tree_hash_for_snapshot(

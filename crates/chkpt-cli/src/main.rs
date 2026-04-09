@@ -24,6 +24,9 @@ enum Commands {
         /// Include dependency directories (node_modules, .venv, etc.)
         #[arg(long)]
         include_deps: bool,
+        /// Split generated pack .dat files into parts of this many bytes
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        pack_chunk_bytes: Option<u64>,
     },
     /// List all checkpoints
     List {
@@ -142,10 +145,12 @@ fn main() -> Result<()> {
         Commands::Save {
             message,
             include_deps,
+            pack_chunk_bytes,
         } => {
             let opts = chkpt_core::ops::save::SaveOptions {
                 message,
                 include_deps,
+                pack_chunk_bytes,
                 progress: save_progress(),
             };
             let result = chkpt_core::ops::save::save(&workspace, opts)?;

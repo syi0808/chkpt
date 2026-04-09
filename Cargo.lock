@@ -244,6 +244,8 @@ dependencies = [
  "memmap2",
  "rusqlite",
  "rustix 0.38.44",
+ "serde",
+ "serde_json",
  "tar",
  "tempfile",
  "thiserror 1.0.69",

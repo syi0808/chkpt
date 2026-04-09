@@ -89,3 +89,35 @@ fn test_delete_works_without_snapshot_or_tree_files() {
     delete(workspace.path(), &snapshot.snapshot_id).unwrap();
     assert!(list(workspace.path(), None).unwrap().is_empty());
 }
+
+#[test]
+fn test_delete_removes_chunked_pack_files() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(
+        workspace.path().join("large.bin"),
+        (0..4096)
+            .map(|index| ((index * 19 + index / 3) % 251) as u8)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let snapshot = save(
+        workspace.path(),
+        SaveOptions {
+            pack_chunk_bytes: Some(64),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let layout = StoreLayout::new(&project_id_from_path(workspace.path()));
+    assert!(!chkpt_core::store::pack::list_packs(&layout.packs_dir())
+        .unwrap()
+        .is_empty());
+
+    delete(workspace.path(), &snapshot.snapshot_id).unwrap();
+
+    assert!(chkpt_core::store::pack::list_packs(&layout.packs_dir())
+        .unwrap()
+        .is_empty());
+    assert_eq!(fs::read_dir(layout.packs_dir()).unwrap().count(), 0);
+}

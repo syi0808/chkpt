@@ -1,6 +1,6 @@
 use chkpt_core::store::blob::hash_content;
 use chkpt_core::store::blob::hash_content_bytes;
-use chkpt_core::store::pack::{PackReader, PackSet, PackWriter};
+use chkpt_core::store::pack::{list_packs, PackFinishOptions, PackReader, PackSet, PackWriter};
 use tempfile::TempDir;
 
 #[test]
@@ -198,4 +198,73 @@ fn test_pack_locate_bytes() {
 
     let missing = [0u8; 16];
     assert!(pack_set.locate_bytes(&missing).is_none());
+}
+
+#[test]
+fn test_pack_chunked_dat_write_and_read() {
+    let dir = TempDir::new().unwrap();
+    let packs_dir = dir.path().join("packs");
+    std::fs::create_dir_all(&packs_dir).unwrap();
+
+    let mut writer = PackWriter::new(&packs_dir).unwrap();
+    let hash_one = writer.add(b"first chunked object").unwrap();
+    let hash_two = writer.add(b"second chunked object").unwrap();
+    let pack_hash = writer
+        .finish_with_options(PackFinishOptions {
+            chunk_bytes: Some(32),
+        })
+        .unwrap();
+
+    assert!(!packs_dir.join(format!("pack-{}.dat", pack_hash)).exists());
+    assert!(packs_dir
+        .join(format!("pack-{}.dat.parts.json", pack_hash))
+        .exists());
+    assert!(packs_dir
+        .join(format!("pack-{}.dat.part-000000", pack_hash))
+        .exists());
+    assert!(packs_dir
+        .join(format!("pack-{}.dat.part-000001", pack_hash))
+        .exists());
+    assert_eq!(list_packs(&packs_dir).unwrap(), vec![pack_hash.clone()]);
+
+    let reader = PackReader::open(&packs_dir, &pack_hash).unwrap();
+    assert_eq!(reader.read(&hash_one).unwrap(), b"first chunked object");
+    assert_eq!(reader.read(&hash_two).unwrap(), b"second chunked object");
+}
+
+#[test]
+fn test_pack_chunked_reader_streams_entry_across_part_boundary() {
+    let dir = TempDir::new().unwrap();
+    let packs_dir = dir.path().join("packs");
+    std::fs::create_dir_all(&packs_dir).unwrap();
+
+    let content: Vec<u8> = (0..4096)
+        .map(|index| ((index * 37 + index / 11) % 251) as u8)
+        .collect();
+
+    let mut writer = PackWriter::new(&packs_dir).unwrap();
+    let hash = writer.add(&content).unwrap();
+    let pack_hash = writer
+        .finish_with_options(PackFinishOptions {
+            chunk_bytes: Some(64),
+        })
+        .unwrap();
+
+    let part_count = std::fs::read_dir(&packs_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("pack-{}.dat.part-", pack_hash))
+        })
+        .count();
+    assert!(
+        part_count > 2,
+        "test fixture should create several part files"
+    );
+
+    let reader = PackReader::open(&packs_dir, &pack_hash).unwrap();
+    assert_eq!(reader.read(&hash).unwrap(), content);
 }
