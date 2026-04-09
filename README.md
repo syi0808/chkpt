@@ -14,6 +14,7 @@ chkpt is a fast, content-addressable checkpoint system. One `chkpt save` before 
 - **Catalog-backed metadata** for fast snapshot lookup, listing, and restore planning.
 - **Atomic restore** that keeps your workspace intact if something fails midway.
 - **Optional dependency scanning** when you want to include `node_modules`, `.venv`, and similar directories.
+- **Optional pack chunking** when you need pack data stored as smaller part files.
 - **Multiple interfaces**: CLI, Node.js API, MCP server, and Claude Code plugin.
 
 ## Performance
@@ -97,6 +98,15 @@ chkpt delete <id>
 chkpt save --include-deps
 ```
 
+### Optional Pack Chunking
+
+```bash
+# Split newly generated pack data into 48 MiB part files
+chkpt save --pack-chunk-bytes 50331648
+```
+
+Pack chunking is opt-in. When enabled, chkpt writes `pack-<hash>.dat.parts.json` plus `pack-<hash>.dat.part-000000`, `pack-<hash>.dat.part-000001`, and so on. Restore reads those parts directly; no manual join step is required.
+
 ### Claude Code MCP Tools
 
 | Tool | Description |
@@ -131,6 +141,8 @@ Workspace                      ~/.chkpt/stores/
 3. **Deduplicate**: skip content already in the store
 4. **Compress & store**: write new content with LZ4 compression
 5. **Record snapshot**: persist metadata and manifest in `catalog.sqlite`
+
+By default, each pack's compressed blob data is stored in `packs/pack-<hash>.dat` with a sibling `.idx` file. With `--pack-chunk-bytes`, the `.dat` payload is stored as contiguous part files plus a small parts manifest instead.
 
 ## Project Structure
 
